@@ -1,0 +1,364 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>GMS Lighting Dashboard</title>
+<meta name="theme-color" content="#000000">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="GMS Lighting">
+<link rel="manifest" href="manifest.webmanifest">
+<link rel="icon" href="icons/icon-192.png">
+<link rel="apple-touch-icon" href="icons/apple-touch-icon.png">
+<link rel="stylesheet" href="styles.css">
+<script src="config.js"></script>
+</head>
+<body>
+
+<header class="top">
+  <div class="top-row">
+    <div class="brand"><img class="logo" src="icons/logo.png" alt="GMS"><div><b>GMS Lighting</b><small>Dashboard</small></div></div>
+    <select id="svcSelect" class="svc-select" aria-label="Service"></select>
+    <span class="sync" id="syncState"><i></i><span>Local</span></span>
+    <span class="flex"></span>
+    <button class="icon-btn" id="openSettings" aria-label="Settings">⚙</button>
+  </div>
+  <div class="top-row master">
+    <div class="knob"><span>Brightness</span><input type="range" id="gBright" min="1" max="100" value="100"><output id="gBrightV">100</output></div>
+    <div class="knob"><span>Speed</span><input type="range" id="gSpeed" min="0" max="100" value="80"><output id="gSpeedV">80</output></div>
+    <label class="live-col" id="liveColorBtn" title="Live colour: used by Colour, Follow audio and FX">
+      <input type="color" id="liveColor" value="#FFFFFF" aria-label="Live colour"><span>Colour</span>
+    </label>
+    <button class="btn audio-btn" id="audioToggle" title="Follow audio from the mic">♪ Audio</button>
+    <button class="btn" id="pwrOn">On</button>
+    <button class="btn" id="pwrOff">Off</button>
+    <button class="btn inv" id="blackout">Blackout</button>
+  </div>
+</header>
+
+<div class="app">
+  <aside class="lights-pane">
+    <div class="pane-h">
+      <h2>Lights</h2>
+      <span class="target" id="targetInfo">0 selected</span>
+      <button class="btn sm inv" id="addBtn">+ Connect</button>
+    </div>
+    <div class="bt-warn" id="btWarn" hidden></div>
+    <div class="lights" id="lightList">
+      <div class="empty" id="emptyLights">
+        <b>No lights connected.</b> Tap <b>+ Connect</b> to add one.
+        <button class="btn sm" id="scanAll" style="margin-top:8px;width:100%">Show all devices</button>
+        <ol><li>Close LotusLamp X on any phone</li><li>Tap <b>+ Connect</b> and pick a MELK light</li><li>Repeat for each light</li></ol>
+        <p>Tap a light to control it. Tap more to add them to the selection.</p>
+      </div>
+    </div>
+    <div class="pane-f">
+      <button class="btn sm" id="selAll">All</button>
+      <button class="btn sm" id="selNone">None</button>
+      <button class="btn sm" id="selInvert">Invert</button>
+      <button class="btn sm" id="reconnectAll">Reconnect</button>
+    </div>
+  </aside>
+
+  <main>
+    <nav class="tabs" id="tabs">
+      <button data-v="show" class="on">Show</button>
+      <button data-v="colour">Colour</button>
+      <button data-v="white">White</button>
+      <button data-v="patterns">Patterns</button>
+      <button data-v="music">Music</button>
+      <button data-v="scenes">Scenes</button>
+      <button data-v="schedule">Schedule</button>
+      <button data-v="console">Console</button>
+    </nav>
+
+    <div class="views">
+
+      <!-- SHOW (ProPresenter-style operator screen) -->
+      <section class="view on" id="v-show">
+        <div class="pp">
+          <div class="card pp-lib">
+            <div class="card-h"><h3>Setlist</h3><span class="flex"></span><button class="btn sm inv" id="songAdd">+ Song</button></div>
+            <div id="setlist"></div>
+            <div class="row"><button class="btn sm" id="songUp" aria-label="Move up">↑</button><button class="btn sm" id="songDown" aria-label="Move down">↓</button><button class="btn sm" id="songDup">Duplicate</button><button class="btn sm danger" id="songDel">Remove</button></div>
+            <button class="btn sm full" id="songCopyFrom">Copy a song from another service</button>
+            <details class="svc-details">
+              <summary>Service details</summary>
+              <input type="text" id="svcName" class="full" placeholder="Service name">
+              <div class="row"><input type="date" id="svcDate" class="flex"><button class="btn sm" id="svcNew">New</button><button class="btn sm" id="svcDup">Duplicate</button><button class="btn sm danger" id="svcDel">Delete</button></div>
+              <textarea id="svcNotes" class="full" rows="2" placeholder="Notes (team, theme, reminders)"></textarea>
+            </details>
+          </div>
+
+          <div class="pp-main">
+            <div class="card pp-bar">
+              <div class="now">
+                <div class="s" id="liveSong">No song</div>
+                <div class="c" id="liveCue">Add a song to begin</div>
+              </div>
+              <span class="beat" id="beatDot"></span>
+              <div class="bpm"><span>BPM</span><input type="number" id="songBpm" min="40" max="220" inputmode="numeric"><button class="btn sm" id="tapTempo">Tap</button></div>
+              <div class="seg"><button class="on" id="modeLive">Live</button><button id="modeEdit">Edit</button></div>
+            </div>
+
+            <div class="pp-go">
+              <button class="btn big" id="cuePrev">◀ Prev</button>
+              <button class="btn big inv" id="cueNext">Next ▶</button>
+              <button class="btn big" id="clearHouse" title="House lights (warm white)">House</button>
+              <button class="btn big" id="holdBeat" title="Stop beat pulse, fades, audio and FX">Hold</button>
+            </div>
+            <details class="fx-wrap" open><summary>FX <span class="hint">· Flash / Strobe / Black work while held</span></summary><div class="fxbar">
+  <button class="btn" data-hold="flash">Flash</button>
+  <button class="btn" data-hold="cflash">Colour flash</button>
+  <button class="btn" data-hold="strobe">Strobe</button>
+  <button class="btn" data-hold="cstrobe">Colour strobe</button>
+  <button class="btn" data-hold="black">Black</button>
+  <button class="btn" data-fx="swell">Swell ↑</button>
+  <button class="btn" data-fx="fadeout">Fade out ↓</button>
+  <button class="btn" data-fx="random">Random</button>
+  <button class="btn" data-fx="spread">Rainbow spread</button>
+  <button class="btn" data-fx="chase">Light chase</button>
+  <button class="btn" data-fx="same">Match first</button>
+</div></details>
+
+            <div class="pp-edit" id="editTools" hidden>
+              <input type="text" id="songName" placeholder="Song name">
+              <input type="text" id="songNote" placeholder="Key / notes">
+              <button class="btn sm" id="cueAdd">+ Cue from current look</button>
+              <button class="btn sm" id="cueAddBlank">+ Blank cue</button>
+              <button class="btn sm" id="songArr">Rebuild from arrangement</button>
+            </div>
+
+            <div class="tiles" id="cueGrid"></div>
+            <p class="hint kb">Tap a tile to send it live. Switch to <b>Edit</b> to change looks. Keyboard: <b>Space</b> next · <b>←</b> back · <b>1–9</b> jump · <b>B</b> blackout · <b>T</b> tap tempo</p>
+
+            <div class="card editor" id="cueEdit" hidden>
+              <div class="card-h"><h3>Edit cue</h3><span class="flex"></span><button class="btn sm inv" id="ceClose">Done</button></div>
+              <div class="ed-grid">
+                <label>Name<input type="text" id="ceName"></label>
+                <label>Look<select id="ceMode"><option value="color">Colour</option><option value="effect">Pattern</option><option value="cct">White</option><option value="audio">Follow audio</option><option value="off">Off</option></select></label>
+                <label data-m="color audio">Colour<input type="color" id="ceColor"></label>
+                <label data-m="audio">Audio mode<select id="ceAudio"><option value="pulse">Pulse</option><option value="beat">Beat flash</option><option value="breathe">Breathe</option><option value="drop">Drop strobe</option><option value="chase">Beat chase</option></select></label>
+                <label data-m="effect">Pattern<select id="ceEffect"></select></label>
+                <label data-m="effect">Preview style<select id="ceKind"></select></label>
+                <label data-m="effect">Preview colours<span class="row tight"><input type="color" id="ceP1"><input type="color" id="ceP2"><input type="color" id="ceP3"><button class="btn sm" id="ceP" type="button">Save</button></span></label>
+                <label data-m="cct">Warm ↔ Cool<input type="range" id="ceCct" min="0" max="100"></label>
+                <label>Brightness <output id="ceBrightV"></output><input type="range" id="ceBright" min="1" max="100"></label>
+                <label>Speed <output id="ceSpeedV"></output><input type="range" id="ceSpeed" min="0" max="100"></label>
+                <label>Fade in (sec)<input type="number" id="ceFade" min="0" max="20" step="0.5" inputmode="decimal"></label>
+                <label>Beat pulse<select id="ceBeat"><option value="none">None</option><option value="pulse">Pulse every beat</option><option value="flash">Flash every beat</option><option value="half">Pulse every 2 beats</option><option value="bar">Pulse every bar</option></select></label>
+                <label>Applies to<select id="ceWho"><option value="sel">Selected lights</option><option value="all">All lights</option></select></label>
+              </div>
+              <canvas class="strip big" id="cePreviewStrip"></canvas>
+              <div class="row">
+                <button class="btn sm" id="ceLeft">◀ Move</button><button class="btn sm" id="ceRight">Move ▶</button>
+                <button class="btn sm" id="ceGrab">Use current look</button>
+                <button class="btn sm" id="ceTry">Send to lights</button>
+                <span class="flex"></span>
+                <button class="btn sm danger" id="ceDel">Delete cue</button>
+              </div>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- COLOUR -->
+      <section class="view" id="v-colour">
+        <div class="cols">
+          <div class="card">
+            <h3>Colour</h3>
+            <div class="wheel-wrap">
+              <canvas id="wheel" width="520" height="520"></canvas>
+              <div class="wheel-side">
+                <div class="preview" id="preview"><span>#FFFFFF</span></div>
+                <div class="field"><label>Hue</label><input type="range" id="hue" min="0" max="360" value="0"><output id="hueV">0°</output></div>
+                <div class="field"><label>Saturation</label><input type="range" id="sat" min="0" max="100" value="0"><output id="satV">0</output></div>
+                <div class="field"><label>Level</label><input type="range" id="val" min="0" max="100" value="100"><output id="valV">100</output></div>
+              </div>
+            </div>
+          </div>
+          <div class="card">
+            <h3>RGB / HEX</h3>
+            <div class="field wide"><label>Red</label><input type="range" id="cr" min="0" max="255"><input type="number" id="crn" min="0" max="255" inputmode="numeric"></div>
+            <div class="field wide"><label>Green</label><input type="range" id="cg" min="0" max="255"><input type="number" id="cgn" min="0" max="255" inputmode="numeric"></div>
+            <div class="field wide"><label>Blue</label><input type="range" id="cb" min="0" max="255"><input type="number" id="cbn" min="0" max="255" inputmode="numeric"></div>
+            <div class="field wide"><label>HEX</label><input type="text" id="hex" class="mono" maxlength="7" autocapitalize="characters"><span></span></div>
+            <h3 class="sub">Quick colours</h3>
+            <div class="swatches" id="swatches"></div>
+            <h3 class="sub">Recent</h3>
+            <div class="swatches" id="recent"></div>
+          </div>
+          <div class="card">
+            <h3>Transition &amp; FX</h3>
+            <div class="field"><label>Transition</label><input type="range" id="xfade" min="0" max="5" step="0.5" value="0"><output id="xfadeV">Instant</output></div>
+            <p class="hint" style="margin:0 0 6px">Fades swatches, HEX entries, scenes and House over this time. Dragging the wheel is always instant.</p>
+            <div class="field"><label>Strobe rate</label><input type="range" id="strobeRate" min="2" max="20" value="10"><output id="strobeRateV">10 Hz</output></div>
+            <div class="fxbar">
+  <button class="btn" data-hold="flash">Flash</button>
+  <button class="btn" data-hold="cflash">Colour flash</button>
+  <button class="btn" data-hold="strobe">Strobe</button>
+  <button class="btn" data-hold="cstrobe">Colour strobe</button>
+  <button class="btn" data-hold="black">Black</button>
+  <button class="btn" data-fx="swell">Swell ↑</button>
+  <button class="btn" data-fx="fadeout">Fade out ↓</button>
+  <button class="btn" data-fx="random">Random</button>
+  <button class="btn" data-fx="spread">Rainbow spread</button>
+  <button class="btn" data-fx="chase">Light chase</button>
+  <button class="btn" data-fx="same">Match first</button>
+</div>
+          </div>
+        </div>
+      </section>
+
+      <!-- WHITE -->
+      <section class="view" id="v-white">
+        <div class="cols">
+          <div class="card">
+            <h3>White temperature</h3>
+            <div class="cct-bar"></div>
+            <div class="field"><label>Warm ↔ Cool</label><input type="range" id="cct" min="0" max="100" value="50"><output id="cctV">4400K</output></div>
+            <div class="chips">
+              <button class="btn sm" data-k="0">1800K Candle</button><button class="btn sm" data-k="25">3100K Warm</button>
+              <button class="btn sm" data-k="50">4400K Neutral</button><button class="btn sm" data-k="75">5700K Daylight</button><button class="btn sm" data-k="100">7000K Cool</button>
+            </div>
+            <div class="row" style="margin-top:14px"><span class="hint">Mode</span>
+              <div class="seg"><button class="on" id="cctNative">Native white</button><button id="cctRgb">RGB mix</button></div></div>
+            <p class="hint">Use <b>RGB mix</b> if your strip has no dedicated white LEDs.</p>
+          </div>
+        </div>
+      </section>
+
+      <!-- PATTERNS -->
+      <section class="view" id="v-patterns">
+        <div class="card lab">
+          <div class="card-h"><h3>Pattern lab</h3><span class="flex"></span><span class="hint">Step through codes, watch the strip, then name it to match the app</span></div>
+          <div class="lab-row">
+            <button class="btn big" id="labPrev">◀</button>
+            <div class="lab-mid">
+              <div class="lab-code"><span id="labCode">0</span><small id="labHex">0x00</small></div>
+              <canvas class="strip big" id="labStrip"></canvas>
+            </div>
+            <button class="btn big" id="labNext">▶</button>
+          </div>
+          <div class="lab-form">
+            <label>Name<input type="text" id="labName" placeholder="e.g. W-R-W Flow"></label>
+            <label>Preview style<select id="labKind"></select></label>
+            <label>Colours<span class="row tight"><input type="color" id="labC1"><input type="color" id="labC2"><input type="color" id="labC3"><button class="btn sm" id="labRainbow" title="Use rainbow">🌈</button></span></label>
+            <div class="row tight"><button class="btn sm inv" id="labSave">Save</button><button class="btn sm" id="labReset">Reset</button><button class="btn sm" id="labFav">☆</button></div>
+          </div>
+          <div class="row">
+            <button class="btn sm" id="labAuto">▶ Auto-step</button>
+            <select id="labSecs"><option value="2">every 2s</option><option value="4" selected>every 4s</option><option value="6">every 6s</option><option value="10">every 10s</option></select>
+            <input type="number" id="labJump" min="0" max="255" placeholder="Go to #" inputmode="numeric" style="width:110px">
+          </div>
+        </div>
+
+        <div class="ptools">
+          <input type="search" id="pSearch" class="full" placeholder="Search patterns by name or number">
+          <span class="hint" id="pCount"></span>
+        </div>
+        <div class="chips" id="pChips"></div>
+        <p class="hint">● = confirmed for MELK-OA10 · Previews are simulations. Patterns you've edited in the lab show your saved style.</p>
+        <div class="pgrid" id="pGrid"></div>
+      </section>
+
+      <!-- MUSIC -->
+      <section class="view" id="v-music">
+        <div class="cols">
+          <div class="card">
+            <div class="card-h"><h3>Follow audio</h3><span class="flex"></span><span class="beat" id="audBeat"></span><span class="hint mono">BPM <b id="audBpm">–</b></span><button class="btn sm" id="audUseBpm">Use for song</button></div>
+            <div class="row"><button class="btn inv" id="audStart">▶ Follow audio</button>
+              <select id="audInput" class="flex" aria-label="Audio input"><option value="">Default microphone</option></select></div>
+            <p class="hint" style="margin:0">Tip: plug the sound desk's aux/line out into a USB audio interface and pick it here for the cleanest signal.</p>
+            <h3 class="sub">Mode</h3>
+            <div class="chips" id="audModes"></div>
+            <p class="hint" id="audModeHint" style="margin:0"></p>
+            <h3 class="sub">Colour</h3>
+            <div class="seg" id="audSource"><button data-s="live">Live colour (locked)</button><button data-s="palette">Palette</button><button data-s="rainbow">Rainbow</button></div>
+            <p class="hint" style="margin:0">Live colour is the chip in the top bar. Change it any time, even while following.</p>
+            <div class="row"><label class="check"><input type="checkbox" id="audSpread"> Spread colours across lights</label>
+              <span class="flex"></span><span class="hint">Lights</span><select id="audWho"><option value="sel">Selected</option><option value="all">All connected</option></select></div>
+            <h3 class="sub">Palette</h3>
+            <div class="pal" id="audPalette"></div>
+            <div class="chips" id="palPresets"></div>
+          </div>
+          <div class="card">
+            <h3>Response</h3>
+            <div class="field"><label>Gain</label><input type="range" id="aGain" min="10" max="400" value="140"><output id="aGainV">1.4×</output></div>
+            <div class="field"><label>Noise floor</label><input type="range" id="aFloor" min="0" max="80" value="8"><output id="aFloorV">8</output></div>
+            <div class="field"><label>Smoothing</label><input type="range" id="aSmooth" min="0" max="95" value="45"><output id="aSmoothV">45</output></div>
+            <div class="field"><label>Beat sens.</label><input type="range" id="aSens" min="0" max="100" value="55"><output id="aSensV">55</output></div>
+            <div class="field"><label>Min bright</label><input type="range" id="aMin" min="0" max="60" value="5"><output id="aMinV">5</output></div>
+            <div class="field"><label>Max bright</label><input type="range" id="aMax" min="10" max="100" value="100"><output id="aMaxV">100</output></div>
+            <div class="meter"><i id="aMeter"></i></div>
+            <canvas id="spec" width="600" height="90"></canvas>
+          </div>
+          <div class="card">
+            <h3>Controller microphone</h3>
+            <p class="hint">Uses the mic built into the light controller, if it has one. Colours come from the controller, not from here.</p>
+            <div class="row"><button class="btn" id="micOn">Enable mic</button><button class="btn" id="micOff">Disable mic</button></div>
+            <div class="field"><label>Sensitivity</label><input type="range" id="micSens" min="0" max="100" value="60"><output id="micSensV">60</output></div>
+            <h3 class="sub">Mic modes</h3>
+            <div class="chips" id="micModes"></div>
+          </div>
+        </div>
+      </section>
+
+      <!-- SCENES -->
+      <section class="view" id="v-scenes">
+        <div class="row"><button class="btn inv" id="sceneSave">Save current look</button><span class="hint">Scenes are shared across all services.</span></div>
+        <div class="scenes" id="sceneGrid"></div>
+      </section>
+
+      <!-- SCHEDULE -->
+      <section class="view" id="v-schedule">
+        <div class="cols">
+          <div class="card">
+            <h3>Controller clock</h3>
+            <p class="hint">Timers run on the controller, so they work with this device off. Sync the clock first.</p>
+            <div class="row"><button class="btn" id="syncClock">Sync clock</button><span class="mono hint" id="nowClock"></span></div>
+          </div>
+          <div class="card">
+            <h3>On timer</h3>
+            <div class="row"><input type="time" id="onTime" value="18:30"><label class="check"><input type="checkbox" id="onEn" checked> Enabled</label></div>
+            <div class="days" id="onDays"></div>
+            <button class="btn" id="onSet">Send on timer</button>
+          </div>
+          <div class="card">
+            <h3>Off timer</h3>
+            <div class="row"><input type="time" id="offTime" value="23:00"><label class="check"><input type="checkbox" id="offEn" checked> Enabled</label></div>
+            <div class="days" id="offDays"></div>
+            <button class="btn" id="offSet">Send off timer</button>
+          </div>
+        </div>
+      </section>
+
+      <!-- CONSOLE -->
+      <section class="view" id="v-console">
+        <div class="card">
+          <div class="card-h"><h3>Raw command</h3><span class="flex"></span><span class="hint mono">7E LEN CMD P1 P2 P3 P4 P5 EF</span></div>
+          <div class="row"><input type="text" id="rawHex" class="full mono" placeholder="7e 00 05 03 ff 00 00 00 ef" autocapitalize="off"><button class="btn inv" id="rawSend">Send</button></div>
+          <div class="row">
+            <button class="btn sm" data-raw="7e 07 83">Login 1</button><button class="btn sm" data-raw="7e 04 04">Login 2</button>
+            <button class="btn sm" data-raw="7e 00 01 fa 00 00 00 00 ef">Query</button>
+            <label class="check"><input type="checkbox" id="logTx"> Log every write</label>
+            <span class="flex"></span><button class="btn sm" id="logClear">Clear</button>
+          </div>
+        </div>
+        <div class="card" style="margin-top:14px"><h3>Log</h3><div id="log"></div></div>
+      </section>
+    </div>
+  </main>
+</div>
+
+<!-- Modal -->
+<div class="modal" id="modal" hidden>
+  <div class="sheet" id="sheet"></div>
+</div>
+<div class="toast" id="toast"></div>
+
+<script src="app.js" defer></script>
+</body>
+</html>
