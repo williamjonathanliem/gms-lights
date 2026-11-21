@@ -1,0 +1,10 @@
+{
+  "name": "gms-lighting-bridge",
+  "version": "1.0.0",
+  "description": "Sends ProPresenter slide groups and OBS scene changes to the GMS Lighting Dashboard",
+  "type": "module",
+  "main": "bridge.js",
+  "scripts": { "start": "node bridge.js" },
+  "engines": { "node": ">=18" },
+  "dependencies": { "obs-websocket-js": "^5.0.6" }
+}

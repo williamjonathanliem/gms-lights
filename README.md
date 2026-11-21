@@ -57,6 +57,10 @@ On a laptop, open it in Chrome and click the install icon in the address bar.
 | S (hold) | Strobe |
 | A | Follow audio on/off |
 
+## ProPresenter & OBS
+
+See `bridge/README.md`. A small bridge program on the ProPresenter / OBS computer lets the lights follow slide groups (Verse, Chorus…) and OBS scenes. Turn it on or off with **Follow ProPresenter** on the Show screen; set up OBS mappings in **Settings → ProPresenter & OBS**.
+
 ## What's saved where
 
 | Data | Where |

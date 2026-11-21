@@ -176,7 +176,7 @@ async function initCloud() {
     if (DB.code && !(await DB.sb.rpc("gms_check", { code: DB.code })).data) DB.code = "";
     if (!DB.code) { setSync("err", "Locked"); const ok = await passcodeSheet(); if (!ok) { setSync("", "Offline (this device)"); return; } }
     await cloudPull();
-    startPolling();
+    startPolling(); startBridgeListener();
   } catch (e) {
     console.warn(e); setSync("err", "Offline (cached)"); log("Cloud unavailable: " + (e.message || e), "err");
   }
@@ -284,6 +284,7 @@ function settingsSheet() {
       <button class="btn" id="stExport">Export backup</button>
       <label class="btn" style="margin:0;color:var(--text)">Import backup<input type="file" id="stImport" accept=".json" hidden></label>
     </div>
+    ${integrationsHtml()}
     <details style="margin-top:12px"><summary class="hint" style="cursor:pointer">Database connection</summary>
       <label>Supabase URL<input type="url" id="stUrl" value="${esc(c.url)}" placeholder="https://xxxx.supabase.co"></label>
       <label>Publishable key<input type="text" id="stKey" value="${esc(c.key)}" placeholder="sb_publishable_…"></label>
@@ -291,8 +292,9 @@ function settingsSheet() {
     </details>
     <div class="acts"><button class="btn inv" id="stClose">Close</button></div>`, (close) => {
     $("stClose").onclick = () => close();
+    wireIntegrations();
     $("stSave").onclick = () => { local.set("supa", { url: $("stUrl").value.trim(), key: $("stKey").value.trim() }); location.reload(); };
-    if ($("stIn")) $("stIn").onclick = async () => { close(); if (await passcodeSheet()) cloudPull().then(startPolling).catch((e) => toast(e.message)); };
+    if ($("stIn")) $("stIn").onclick = async () => { close(); if (await passcodeSheet()) cloudPull().then(() => { startPolling(); startBridgeListener(); }).catch((e) => toast(e.message)); };
     if ($("stOut")) $("stOut").onclick = () => { DB.code = ""; local.set("code", ""); clearInterval(pollTimer); setSync("err", "Locked"); close(); toast("Locked. Changes now stay on this device."); };
     if ($("stSync")) $("stSync").onclick = () => { close(); cloudPull().catch((e) => { setSync("err", "Sync failed"); toast(e.message); }); };
     $("stExport").onclick = () => {
@@ -1203,8 +1205,9 @@ function renderSvcList() {
   if (!DB.services.length) { box.innerHTML = `<div class="ps-empty">No services yet. Tap + to create one.</div>`; return; }
   DB.services.forEach((s, i) => {
     const el = document.createElement("div"); el.className = "ps-row" + (i === svcIdx ? " cur" : "");
-    el.innerHTML = `<span class="ps-i pl"></span><span class="t">${esc(s.name || "Untitled Service")}</span><span class="r">${esc(fmtDate(s.service_date))}</span>`;
-    el.onclick = () => { if (i === svcIdx) return; svcIdx = i; songIdx = 0; cueIdx = -1; editIdx = -1; takeOver(); renderShow(); };
+    el.innerHTML = `<span class="ps-i pl"></span><span class="t">${esc(s.name || "Untitled Service")}</span><span class="r">${esc(fmtDate(s.service_date))}</span><button class="ps-ico ps-more" aria-label="Service options">⋯</button>`;
+    el.oncontextmenu = (e) => { e.preventDefault(); serviceMenu(i); };
+    el.onclick = (e) => { if (e.target.closest(".ps-more")) { serviceMenu(i); return; } if (i === svcIdx) return; svcIdx = i; songIdx = 0; cueIdx = -1; editIdx = -1; takeOver(); renderShow(); };
     box.appendChild(el);
   });
 }
@@ -1548,6 +1551,120 @@ document.querySelectorAll("[data-raw]").forEach((b) => (b.onclick = () => sendRa
 $("logClear").onclick = () => ($("log").innerHTML = "");
 
 /* ---------------------------------------------------------------------
+   INTEGRATIONS: ProPresenter + OBS via the GMS Lighting Bridge
+   The bridge (bridge/ folder) runs on the ProPresenter / OBS computer and
+   broadcasts slide-group and scene changes on a channel derived from the passcode.
+   --------------------------------------------------------------------- */
+const BR = { ch: null, last: 0, info: {}, lastEvent: "", ppGroupKey: "",
+  followPP: local.get("followPP", true), followOBS: local.get("followOBS", true) };
+async function sha256hex(s) { const b = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(s)); return [...new Uint8Array(b)].map((x) => x.toString(16).padStart(2, "0")).join(""); }
+async function startBridgeListener() {
+  if (!DB.sb || !DB.code || !crypto.subtle) return;
+  try { if (BR.ch) DB.sb.removeChannel(BR.ch); } catch (e) {}
+  const topic = "gms-" + (await sha256hex(DB.code + ":gms-bridge")).slice(0, 24);
+  BR.ch = DB.sb.channel(topic)
+    .on("broadcast", { event: "hello" }, ({ payload }) => { BR.last = Date.now(); BR.info = payload || {}; updateBridgeUi(); })
+    .on("broadcast", { event: "pp" }, ({ payload }) => { BR.last = Date.now(); onProPresenter(payload || {}); })
+    .on("broadcast", { event: "obs" }, ({ payload }) => { BR.last = Date.now(); onObs(payload || {}); })
+    .subscribe();
+  setInterval(updateBridgeUi, 5000);
+}
+const bridgeOnline = () => Date.now() - BR.last < 15000;
+function updateBridgeUi() {
+  const on = bridgeOnline(), ppOn = on && BR.info.pp === "connected";
+  const b = $("ppFollow"); b.hidden = !ppOn && !BR.followPPShown;
+  if (ppOn) BR.followPPShown = true;
+  b.classList.toggle("on", BR.followPP); b.textContent = BR.followPP ? "● Following ProPresenter" : "○ Follow ProPresenter";
+  b.title = ppOn ? `${BR.info.ppVersion || "ProPresenter"} on ${BR.info.host || "bridge"}` : "Bridge offline";
+  b.disabled = !ppOn;
+  const st = $("brStatus"); if (st) st.innerHTML = bridgeStatusHtml();
+}
+function bridgeStatusHtml() {
+  if (!DB.code) return "Unlock with the passcode to use integrations.";
+  if (!bridgeOnline()) return `<span style="color:#ff8080">● Bridge offline</span>. Start it on the ProPresenter / OBS computer (see bridge/README).`;
+  const i = BR.info;
+  return `<span style="color:#fff">● Bridge online</span> on <b>${esc(i.host || "?")}</b> · ProPresenter: <b>${esc(i.pp || "?")}</b> · OBS: <b>${esc(i.obs || "?")}</b>${i.obsScene ? ` (${esc(i.obsScene)})` : ""}${BR.lastEvent ? `<br>Last: ${esc(BR.lastEvent)}` : ""}`;
+}
+$("ppFollow").onclick = () => { BR.followPP = !BR.followPP; local.set("followPP", BR.followPP); BR.ppGroupKey = ""; updateBridgeUi(); toast(BR.followPP ? "Lights now follow ProPresenter" : "Stopped following ProPresenter"); };
+
+const norm = (s) => String(s || "").toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
+function onProPresenter(p) {
+  BR.lastEvent = `ProPresenter · ${p.presentation || "?"} › ${p.group || "(no group)"}`;
+  if (!BR.followPP || !svc()) return;
+  // 1. Find the song in this service with the same name as the ProPresenter presentation
+  const items = svc().songs, pn = norm(p.presentation);
+  let si = items.findIndex((x) => !isHdr(x) && norm(x.name) === pn);
+  if (si < 0 && pn) si = items.findIndex((x) => !isHdr(x) && (norm(x.name).includes(pn) || pn.includes(norm(x.name))) && norm(x.name).length > 2);
+  if (si < 0) { $("liveCue").textContent = `ProPresenter: "${p.presentation}" isn't in this setlist`; return; }
+  if (si !== songIdx) { songIdx = si; cueIdx = -1; editIdx = -1; renderSetlist(); renderCues(); BR.ppGroupKey = ""; }
+  // 2. Only react when the slide group changes (several slides in one Chorus = one cue)
+  const gk = p.uuid + ":" + norm(p.group);
+  if (gk === BR.ppGroupKey) return; BR.ppGroupKey = gk;
+  if (!p.group) return;
+  const cues = song().cues, g = norm(p.group), cat = groupOf(p.group).group;
+  // Search forward first (songs move forward), exact name before same section type, then wrap around
+  const fwd = (pred) => { for (let i = cueIdx + 1; i < cues.length; i++) if (pred(cues[i])) return i; return -1; };
+  const any = (pred) => cues.findIndex(pred);
+  const exact = (c) => norm(c.name) === g, same = (c) => cat !== "Other" && groupOf(c.name).group === cat;
+  let ci = fwd(exact); if (ci < 0) ci = fwd(same); if (ci < 0) ci = any(exact); if (ci < 0) ci = any(same);
+  if (ci >= 0 && ci !== cueIdx) goCue(ci);
+}
+
+function obsMap() { return (DB.lib.aliases && DB.lib.aliases.__obs) || {}; }
+function onObs(p) {
+  BR.lastEvent = `OBS · ${p.scene}`; BR.info.obsScene = p.scene; updateBridgeUi();
+  if (!BR.followOBS || p.initial) return;
+  const act = obsMap()[p.scene]; if (!act) return;
+  const T = lights.filter((l) => l.char);
+  if (act === "blackout") { $("blackout").click(); }
+  else if (act === "house") { $("clearHouse").click(); }
+  else if (act.startsWith("scene:")) { const sc = (DB.lib.scenes || []).find((x) => x.id === act.slice(6)); if (sc) { applyLookTo(T, sc, true); } }
+  toast(`OBS → ${p.scene}`);
+}
+function integrationsHtml() {
+  const scenes = [...new Set([...(BR.info.obsScenes || []), ...Object.keys(obsMap())])];
+  const opts = (v) => `<option value="">Do nothing</option><option value="blackout"${v === "blackout" ? " selected" : ""}>Blackout</option><option value="house"${v === "house" ? " selected" : ""}>House lights</option>` +
+    (DB.lib.scenes || []).map((s) => `<option value="scene:${s.id}"${v === "scene:" + s.id ? " selected" : ""}>Scene: ${esc(s.name)}</option>`).join("");
+  return `<details style="margin-top:12px" ${DB.code ? "open" : ""}><summary class="hint" style="cursor:pointer">ProPresenter &amp; OBS</summary>
+    <p class="hint" id="brStatus" style="margin:8px 0">${bridgeStatusHtml()}</p>
+    <label class="check" style="flex-direction:row;margin:6px 0"><input type="checkbox" id="stFollowPP" ${BR.followPP ? "checked" : ""}> Follow ProPresenter: when a slide group changes (Verse, Chorus…), run the matching cue in the song with the same name</label>
+    <label class="check" style="flex-direction:row;margin:6px 0"><input type="checkbox" id="stFollowOBS" ${BR.followOBS ? "checked" : ""}> Follow OBS scenes</label>
+    ${scenes.length ? `<div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;align-items:center;margin-top:6px">${scenes.map((sc) => `<span>${esc(sc)}</span><select data-obs="${esc(sc)}">${opts(obsMap()[sc] || "")}</select>`).join("")}</div>`
+      : `<p class="hint">OBS scenes appear here once the bridge connects to OBS.</p>`}
+  </details>`;
+}
+function wireIntegrations() {
+  if (!$("stFollowPP")) return;
+  $("stFollowPP").onchange = (e) => { BR.followPP = e.target.checked; local.set("followPP", BR.followPP); BR.ppGroupKey = ""; updateBridgeUi(); };
+  $("stFollowOBS").onchange = (e) => { BR.followOBS = e.target.checked; local.set("followOBS", BR.followOBS); };
+  $("sheet").querySelectorAll("[data-obs]").forEach((s) => (s.onchange = () => {
+    DB.lib.aliases = DB.lib.aliases || {}; const m = { ...obsMap() };
+    if (s.value) m[s.dataset.obs] = s.value; else delete m[s.dataset.obs];
+    DB.lib.aliases.__obs = m; saveLib("aliases");
+  }));
+}
+
+/* ---- Service actions: rename, date, duplicate, delete ---- */
+function serviceMenu(i) {
+  const s = DB.services[i]; if (!s) return;
+  modal(`<h2>Service</h2>
+    <label>Name<input type="text" id="smName" value="${esc(s.name || "")}" placeholder="Untitled Service"></label>
+    <label>Date<input type="date" id="smDate" value="${esc(s.service_date || "")}"></label>
+    <label>Notes<textarea id="smNotes" rows="2">${esc(s.notes || "")}</textarea></label>
+    <div class="acts" style="justify-content:space-between">
+      <span class="row tight" style="gap:8px"><button class="btn danger" id="smDel">Delete</button><button class="btn" id="smDup">Duplicate</button></span>
+      <span class="row tight" style="gap:8px"><button class="btn" id="mNo">Cancel</button><button class="btn inv" id="smSave">Save</button></span>
+    </div>`, (close) => {
+    setTimeout(() => { $("smName").focus(); $("smName").select(); }, 50);
+    $("mNo").onclick = () => close();
+    const save = () => { s.name = $("smName").value.trim() || "Untitled Service"; s.service_date = $("smDate").value || s.service_date; s.notes = $("smNotes").value; saveService(s); sortServices(); svcIdx = DB.services.indexOf(s); close(); renderShow(); };
+    $("smSave").onclick = save; $("smName").onkeydown = (e) => { if (e.key === "Enter") save(); };
+    $("smDup").onclick = () => { close(); svcIdx = i; setTimeout(() => $("svcDup").click(), 30); };
+    $("smDel").onclick = () => { close(); svcIdx = i; setTimeout(() => $("svcDel").click(), 30); };
+  });
+}
+
+/* ---------------------------------------------------------------------
    16. KEYBOARD + BOOT
    --------------------------------------------------------------------- */
 document.addEventListener("keydown", (e) => {
@@ -1584,5 +1701,6 @@ log("Ready. Connect a light to begin.");
 const btp = bluetoothProblem(); if (btp) { showBtWarn(btp); log(btp.replace(/<[^>]+>/g, ""), "err"); }
 initCloud().finally(() => createServiceSheet({ start: true }));
 
+window.__gms = { onProPresenter, onObs, state: () => ({ song: song()?.name, cue: song()?.cues[cueIdx]?.name, cueIdx }) };
 if ("serviceWorker" in navigator && location.protocol !== "file:") navigator.serviceWorker.register("sw.js").catch(() => {});
 })();

@@ -1,0 +1,17 @@
+{
+  "passcode": "",
+  "supabaseUrl": "https://vovknswtxjatmluxjndh.supabase.co",
+  "supabaseKey": "sb_publishable__O_MQNFFKHJnXehFeNDl6Q_Ig5V5MBB",
+
+  "propresenter": {
+    "enabled": true,
+    "host": "127.0.0.1",
+    "port": 50001
+  },
+
+  "obs": {
+    "enabled": true,
+    "url": "ws://127.0.0.1:4455",
+    "password": ""
+  }
+}
