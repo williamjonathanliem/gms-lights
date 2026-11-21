@@ -7,22 +7,21 @@ A web app for controlling the GMS LED lights (MELK-OA10 controllers, normally us
 
 ---
 
-## 1. Set up the database (Supabase, about 5 minutes)
+## 1. Database (Supabase)
 
-1. Create a project at https://supabase.com.
-2. Go to **SQL Editor → New query**, paste everything from `supabase/schema.sql`, and click **Run**.
-3. Go to **Authentication → Users → Add user** and create an account for each person on the lighting team (email + password). Turn off public sign-ups under **Authentication → Sign In / Providers** so only people you add can get in.
-4. Go to **Project Settings → API** and copy the **Project URL** and the **anon public** key.
-5. Paste them into `config.js`:
+Live project: `gms-lights` (Supabase). Setup scripts, run in the SQL Editor in this order:
+1. `supabase/schema.sql`: tables
+2. `supabase/passcode.sql`: guest mode with one shared team passcode
 
-```js
-window.GMS_CONFIG = {
-  supabaseUrl: "https://YOUR-PROJECT.supabase.co",
-  supabaseAnonKey: "eyJ...",
-};
+**Guest mode:** anyone with the team passcode can unlock the app and save services and scenes online. The database checks the passcode itself, on every read and write, so the public key in `config.js` can't be used to change data without it. Only a SHA-256 hash of the passcode is stored.
+
+To change the passcode, run this in the SQL Editor:
+```sql
+select encode(extensions.digest('NEWCODE', 'sha256'), 'hex');
 ```
+Then put the result in place of the hash in `gms_ok()` (in `passcode.sql`) and run that file again. Each device will ask for the new code.
 
-The anon key is safe to ship in the app. Row Level Security only lets signed-in team members read or write.
+Public sign-ups are disabled. Per-person accounts can be added later: the tables already allow signed-in Supabase users.
 
 ## 2. Hosting (Vercel)
 
@@ -62,11 +61,11 @@ On a laptop, open it in Chrome and click the install icon in the address bar.
 
 | Data | Where |
 |---|---|
-| Services, songs, cues | Supabase `services` table, one row per service. Syncs live between devices. |
+| Services, songs, cues | Supabase `services` table, one row per service. Other devices pick up changes within about 8 seconds. |
 | Scenes, pattern names, favourites, light names | Supabase `library` table, shared by all services |
 | Everything above | Also cached on the device, so it keeps working if the Wi-Fi drops and syncs again once you're back online |
 
-**Settings (⚙)** has sign in/out, sync now, and an export/import backup option.
+**Settings (⚙)** has enter passcode / lock this device, sync now, and an export/import backup option.
 
 ## About the patterns
 

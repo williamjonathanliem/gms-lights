@@ -147,7 +147,7 @@ const DB = {
   services: local.get("services", null) || [sampleService()],
   lib: Object.assign({ scenes: DEFAULT_SCENES, patterns: {}, favs: [], aliases: {}, recent: [] }, local.get("lib", {})),
   dirty: new Set(local.get("dirty", [])),
-  sb: null, user: null, channel: null, online: false,
+  sb: null, code: "", version: "", online: false,
 };
 const cacheLocal = () => { local.set("services", DB.services); local.set("lib", DB.lib); local.set("dirty", [...DB.dirty]); };
 
@@ -157,57 +157,67 @@ function supaCfg() {
 }
 function setSync(kind, text) { const s = $("syncState"); s.className = "sync " + kind; s.querySelector("span").textContent = text; s.title = text; }
 
+/* Guest mode: one shared team passcode, checked by the database on every call */
+const getCode = () => local.get("code", "");
+const rpc = async (fn, args = {}) => {
+  const { data, error } = await DB.sb.rpc(fn, { code: DB.code, ...args });
+  if (error) { if (error.code === "28000" || /passcode/i.test(error.message)) { DB.code = ""; local.set("code", ""); setSync("err", "Locked"); } throw error; }
+  return data;
+};
+const unlocked = () => !!(DB.sb && DB.code);
+
 async function initCloud() {
   const { url, key } = supaCfg();
   if (!url || !key) { setSync("", "Local only"); return; }
   try {
     const { createClient } = await import("https://esm.sh/@supabase/supabase-js@2");
-    DB.sb = createClient(url, key, { auth: { persistSession: true, autoRefreshToken: true } });
-    const { data } = await DB.sb.auth.getSession();
-    DB.user = data.session?.user || null;
-    DB.sb.auth.onAuthStateChange((_e, session) => { DB.user = session?.user || null; });
-    if (!DB.user) { setSync("err", "Signed out"); const ok = await signInSheet(); if (!ok) { setSync("", "Local only"); return; } }
+    DB.sb = createClient(url, key, { auth: { persistSession: false, autoRefreshToken: false } });
+    DB.code = getCode();
+    if (DB.code && !(await DB.sb.rpc("gms_check", { code: DB.code })).data) DB.code = "";
+    if (!DB.code) { setSync("err", "Locked"); const ok = await passcodeSheet(); if (!ok) { setSync("", "Offline (this device)"); return; } }
     await cloudPull();
-    subscribeRealtime();
+    startPolling();
   } catch (e) {
-    console.warn(e); setSync("err", "Offline (cached)"); log("Cloud unavailable: " + e.message, "err");
+    console.warn(e); setSync("err", "Offline (cached)"); log("Cloud unavailable: " + (e.message || e), "err");
   }
 }
 
 async function cloudPull() {
   setSync("busy", "Syncing…");
   await flushDirty();
-  const [svc, lib] = await Promise.all([
-    DB.sb.from("services").select("*").order("service_date", { ascending: false }),
-    DB.sb.from("library").select("*"),
-  ]);
-  if (svc.error) throw svc.error; if (lib.error) throw lib.error;
-  if (svc.data.length) DB.services = svc.data.map((r) => ({ ...r, songs: r.songs || [] }));
-  else { for (const s of DB.services) await pushService(s); }   // first run: seed cloud with local data
-  if (lib.data.length) lib.data.forEach((r) => { DB.lib[r.key] = r.value; });
+  const d = await rpc("gms_pull");
+  const svcs = d.services || [], lib = d.library || [];
+  if (svcs.length) DB.services = svcs.map((r) => ({ ...r, songs: r.songs || [] }));
+  else { for (const s of DB.services) await pushService(s); }   // first run: seed the database with this device's data
+  if (lib.length) lib.forEach((r) => { DB.lib[r.key] = r.value; });
   else { for (const k of ["scenes", "patterns", "favs", "aliases"]) await pushLib(k); }
-  DB.online = true; cacheLocal(); setSync("ok", "Saved online");
-  renderAll();
+  DB.version = await rpc("gms_version").catch(() => "");
+  DB.online = true; sortServices(); cacheLocal(); setSync("ok", "Saved online");
+  renderAll(true);
 }
 
 async function pushService(s) {
-  if (!DB.sb || !DB.user) { DB.dirty.add("svc:" + s.id); cacheLocal(); return; }
-  const row = { id: s.id, name: s.name, service_date: s.service_date || null, notes: s.notes || "", songs: s.songs, updated_at: s.updated_at, updated_by: DB.user.id };
-  const { error } = await DB.sb.from("services").upsert(row);
-  if (error) { DB.dirty.add("svc:" + s.id); throw error; }
+  if (!unlocked()) { DB.dirty.add("svc:" + s.id); cacheLocal(); return; }
+  try { await rpc("gms_save_service", { row_data: { id: s.id, name: s.name, service_date: s.service_date || "", notes: s.notes || "", songs: s.songs } }); }
+  catch (e) { DB.dirty.add("svc:" + s.id); throw e; }
   DB.dirty.delete("svc:" + s.id);
 }
 async function pushLib(key) {
-  if (!DB.sb || !DB.user) { DB.dirty.add("lib:" + key); cacheLocal(); return; }
-  const { error } = await DB.sb.from("library").upsert({ key, value: DB.lib[key], updated_at: new Date().toISOString() });
-  if (error) { DB.dirty.add("lib:" + key); throw error; }
+  if (!unlocked()) { DB.dirty.add("lib:" + key); cacheLocal(); return; }
+  try { await rpc("gms_save_library", { lib_key: key, lib_value: DB.lib[key] ?? null }); }
+  catch (e) { DB.dirty.add("lib:" + key); throw e; }
   DB.dirty.delete("lib:" + key);
+}
+async function deleteServiceRemote(id) {
+  if (!unlocked()) { DB.dirty.add("svc:" + id); cacheLocal(); return; }
+  try { await rpc("gms_delete_service", { service_id: id }); DB.dirty.delete("svc:" + id); } catch (e) { DB.dirty.add("svc:" + id); }
+  cacheLocal();
 }
 async function flushDirty() {
   for (const d of [...DB.dirty]) {
     const [t, id] = d.split(/:(.+)/);
     try {
-      if (t === "svc") { const s = DB.services.find((x) => x.id === id); if (s) await pushService(s); else { await DB.sb.from("services").delete().eq("id", id); DB.dirty.delete(d); } }
+      if (t === "svc") { const s = DB.services.find((x) => x.id === id); if (s) await pushService(s); else await deleteServiceRemote(id); }
       else await pushLib(id);
     } catch (e) { console.warn("flush", e); }
   }
@@ -217,75 +227,73 @@ async function flushDirty() {
 const pending = new Set();
 const flushSoon = debounce(async () => {
   const jobs = [...pending]; pending.clear();
-  if (!DB.sb || !DB.user) { jobs.forEach((j) => DB.dirty.add(j)); cacheLocal(); return; }
+  if (!unlocked()) { jobs.forEach((j) => DB.dirty.add(j)); cacheLocal(); return; }
   setSync("busy", "Saving…");
   try {
     for (const j of jobs) { const [t, id] = j.split(/:(.+)/); if (t === "svc") { const s = DB.services.find((x) => x.id === id); if (s) await pushService(s); } else await pushLib(id); }
+    DB.version = await rpc("gms_version").catch(() => DB.version);
     cacheLocal(); setSync("ok", "Saved online");
   } catch (e) { cacheLocal(); setSync("err", "Not saved, will retry"); log("Save failed: " + (e.message || e), "err"); }
 }, 700);
 function saveService(s) { s.updated_at = new Date().toISOString(); cacheLocal(); pending.add("svc:" + s.id); flushSoon(); }
 function saveLib(key) { cacheLocal(); pending.add("lib:" + key); flushSoon(); }
 
-function subscribeRealtime() {
-  if (!DB.sb) return;
-  DB.channel = DB.sb.channel("gms-lighting")
-    .on("postgres_changes", { event: "*", schema: "public", table: "services" }, (p) => {
-      if (p.eventType === "DELETE") { DB.services = DB.services.filter((s) => s.id !== p.old.id); if (svc()?.id === p.old.id) svcIdx = 0; renderAll(); return; }
-      const row = { ...p.new, songs: p.new.songs || [] };
-      const i = DB.services.findIndex((s) => s.id === row.id);
-      if (i >= 0 && JSON.stringify(DB.services[i].songs) === JSON.stringify(row.songs) && DB.services[i].name === row.name && DB.services[i].notes === row.notes && DB.services[i].service_date === row.service_date) return;
-      if (i >= 0 && pending.has("svc:" + row.id)) return; // our own edit is about to land
-      if (i >= 0) DB.services[i] = row; else DB.services.push(row);
-      sortServices(); cacheLocal();
-      if (row.updated_by !== DB.user?.id) toast(`"${row.name}" updated on another device`);
-      renderAll(true);
-    })
-    .on("postgres_changes", { event: "*", schema: "public", table: "library" }, (p) => {
-      if (!p.new?.key || pending.has("lib:" + p.new.key)) return;
-      DB.lib[p.new.key] = p.new.value; cacheLocal(); renderAll(true);
-    })
-    .subscribe();
+/* Pick up changes made on other devices (checks every 8 seconds) */
+let pollTimer = null;
+function startPolling() {
+  clearInterval(pollTimer);
+  pollTimer = setInterval(async () => {
+    if (!unlocked() || document.hidden || pending.size || DB.dirty.size || editIdx >= 0 || !$("modal").hidden) return;
+    try {
+      const v = await rpc("gms_version");
+      if (v && v !== DB.version) { await cloudPull(); toast("Updated from another device"); }
+    } catch (e) { /* offline: try again next tick */ }
+  }, 8000);
 }
-window.addEventListener("online", () => { if (DB.sb && DB.user) cloudPull().catch(() => {}); });
+window.addEventListener("online", () => { if (unlocked()) cloudPull().catch(() => {}); });
 window.addEventListener("offline", () => setSync("err", "Offline (cached)"));
 
-function signInSheet() {
-  return modal(`<h2>Sign in</h2><p>Sign in to load and save services online. Ask your admin for an account.</p>
-    <label>Email<input type="email" id="siEmail" autocomplete="username" inputmode="email"></label>
-    <label>Password<input type="password" id="siPass" autocomplete="current-password"></label>
-    <p id="siErr" style="color:#ff8080;min-height:20px;margin:6px 0 0"></p>
-    <div class="acts"><button class="btn" id="siSkip">Use offline</button><button class="btn inv" id="siGo">Sign in</button></div>`, (close) => {
-    $("siSkip").onclick = () => close(false);
+function passcodeSheet() {
+  return modal(`<div style="text-align:center"><img src="icons/logo.png" alt="" style="width:64px;height:64px;border-radius:14px;margin-bottom:10px"></div>
+    <h2 style="text-align:center">GMS Lighting</h2><p style="text-align:center">Enter the team passcode to load and save services online.</p>
+    <label>Passcode<input type="password" id="pcIn" autocomplete="current-password" autocapitalize="characters" style="text-align:center;font-size:20px;letter-spacing:4px"></label>
+    <p id="pcErr" style="color:#ff8080;min-height:20px;margin:6px 0 0;text-align:center"></p>
+    <div class="acts"><button class="btn" id="pcSkip">Use offline</button><button class="btn inv" id="pcGo">Unlock</button></div>`, (close) => {
+    $("pcSkip").onclick = () => close(false);
     const go = async () => {
-      $("siGo").disabled = true; $("siErr").textContent = "";
-      const { data, error } = await DB.sb.auth.signInWithPassword({ email: $("siEmail").value.trim(), password: $("siPass").value });
-      $("siGo").disabled = false;
-      if (error) { $("siErr").textContent = error.message; return; }
-      DB.user = data.user; close(true);
+      const code = $("pcIn").value.trim().toUpperCase(); if (!code) return;
+      $("pcGo").disabled = true; $("pcErr").textContent = "";
+      const { data, error } = await DB.sb.rpc("gms_check", { code });
+      $("pcGo").disabled = false;
+      if (error) { $("pcErr").textContent = "Couldn't reach the database. Check your connection."; return; }
+      if (!data) { $("pcErr").textContent = "Wrong passcode"; $("pcIn").select(); return; }
+      DB.code = code; local.set("code", code); close(true);
     };
-    $("siGo").onclick = go; $("siPass").onkeydown = (e) => { if (e.key === "Enter") go(); };
-    setTimeout(() => $("siEmail").focus(), 50);
+    $("pcGo").onclick = go; $("pcIn").onkeydown = (e) => { if (e.key === "Enter") go(); };
+    setTimeout(() => $("pcIn").focus(), 50);
   });
 }
 
 function settingsSheet() {
   const c = supaCfg();
   modal(`<h2>Settings</h2>
-    <p>${DB.user ? `Signed in as <b style="color:#fff">${esc(DB.user.email)}</b>` : DB.sb ? "Not signed in" : "Running locally (no online database configured)"}</p>
-    <label>Supabase URL<input type="url" id="stUrl" value="${esc(c.url)}" placeholder="https://xxxx.supabase.co"></label>
-    <label>Supabase anon key<input type="text" id="stKey" value="${esc(c.key)}" placeholder="eyJ…"></label>
+    <p>${unlocked() ? `<b style="color:#fff">Unlocked</b>. Services and scenes save online for the whole team.` : DB.sb ? "Locked. Changes are only saved on this device." : "Running locally (no online database configured)."}</p>
     <div class="acts" style="justify-content:flex-start">
-      ${DB.sb && !DB.user ? `<button class="btn" id="stIn">Sign in</button>` : ""}
-      ${DB.user ? `<button class="btn" id="stOut">Sign out</button><button class="btn" id="stSync">Sync now</button>` : ""}
+      ${DB.sb && !unlocked() ? `<button class="btn inv" id="stIn">Enter passcode</button>` : ""}
+      ${unlocked() ? `<button class="btn" id="stSync">Sync now</button><button class="btn" id="stOut">Lock this device</button>` : ""}
       <button class="btn" id="stExport">Export backup</button>
       <label class="btn" style="margin:0;color:var(--text)">Import backup<input type="file" id="stImport" accept=".json" hidden></label>
     </div>
-    <div class="acts"><button class="btn" id="stClose">Close</button><button class="btn inv" id="stSave">Save &amp; reload</button></div>`, (close) => {
+    <details style="margin-top:12px"><summary class="hint" style="cursor:pointer">Database connection</summary>
+      <label>Supabase URL<input type="url" id="stUrl" value="${esc(c.url)}" placeholder="https://xxxx.supabase.co"></label>
+      <label>Publishable key<input type="text" id="stKey" value="${esc(c.key)}" placeholder="sb_publishable_…"></label>
+      <div class="acts" style="justify-content:flex-start"><button class="btn sm" id="stSave">Save &amp; reload</button></div>
+    </details>
+    <div class="acts"><button class="btn inv" id="stClose">Close</button></div>`, (close) => {
     $("stClose").onclick = () => close();
     $("stSave").onclick = () => { local.set("supa", { url: $("stUrl").value.trim(), key: $("stKey").value.trim() }); location.reload(); };
-    if ($("stIn")) $("stIn").onclick = async () => { close(); if (await signInSheet()) cloudPull().then(subscribeRealtime).catch((e) => toast(e.message)); };
-    if ($("stOut")) $("stOut").onclick = async () => { await DB.sb.auth.signOut(); DB.user = null; setSync("err", "Signed out"); close(); };
+    if ($("stIn")) $("stIn").onclick = async () => { close(); if (await passcodeSheet()) cloudPull().then(startPolling).catch((e) => toast(e.message)); };
+    if ($("stOut")) $("stOut").onclick = () => { DB.code = ""; local.set("code", ""); clearInterval(pollTimer); setSync("err", "Locked"); close(); toast("Locked. Changes now stay on this device."); };
     if ($("stSync")) $("stSync").onclick = () => { close(); cloudPull().catch((e) => { setSync("err", "Sync failed"); toast(e.message); }); };
     $("stExport").onclick = () => {
       const blob = new Blob([JSON.stringify({ type: "gms-lighting-backup", version: 1, services: DB.services, library: DB.lib }, null, 2)], { type: "application/json" });
@@ -1154,7 +1162,7 @@ $("svcDup").onclick = async () => {
 $("svcDel").onclick = async () => {
   const s = svc(); if (!s || !(await confirmBox(`Delete "${s.name}"?`, "This removes it for everyone.", "Delete", true))) return;
   DB.services.splice(svcIdx, 1); svcIdx = 0; songIdx = 0; cueIdx = -1;
-  if (DB.sb && DB.user) { const { error } = await DB.sb.from("services").delete().eq("id", s.id); if (error) DB.dirty.add("svc:" + s.id); } else DB.dirty.add("svc:" + s.id);
+  await deleteServiceRemote(s.id);
   if (!DB.services.length) { const n = sampleService(); n.songs = []; DB.services.push(n); saveService(n); }
   cacheLocal(); renderShow();
 };
