@@ -1,7 +1,7 @@
 // GMS Lighting Dashboard: online database settings.
-// Paste your Supabase project URL and anon (public) key here, then redeploy.
-// Leave blank to run in local-only mode. You can also set these in the app under Settings.
+// The publishable key is safe to ship in a web page: Row Level Security only lets
+// signed-in team members read or write. Never put a secret / service_role key here.
 window.GMS_CONFIG = {
-  supabaseUrl: "",
-  supabaseAnonKey: "",
+  supabaseUrl: "https://vovknswtxjatmluxjndh.supabase.co",
+  supabaseAnonKey: "sb_publishable__O_MQNFFKHJnXehFeNDl6Q_Ig5V5MBB",
 };
