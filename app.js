@@ -144,7 +144,7 @@ function sampleService() {
 }
 
 const DB = {
-  services: local.get("services", null) || [sampleService()],
+  services: local.get("services", null) || [],
   lib: Object.assign({ scenes: DEFAULT_SCENES, patterns: {}, favs: [], aliases: {}, recent: [] }, local.get("lib", {})),
   dirty: new Set(local.get("dirty", [])),
   sb: null, code: "", version: "", online: false,
@@ -1130,13 +1130,14 @@ function applyLookTo(T, s, syncUi) {
    --------------------------------------------------------------------- */
 let svcIdx = 0, songIdx = 0, cueIdx = -1, editIdx = -1;
 const svc = () => DB.services[svcIdx];
-const song = () => svc()?.songs[songIdx];
+const song = () => { const it = svc()?.songs[songIdx]; return it && it.type !== "header" ? it : undefined; };
 function sortServices() { const id = svc()?.id; DB.services.sort((a, b) => (b.service_date || "").localeCompare(a.service_date || "")); const i = DB.services.findIndex((s) => s.id === id); svcIdx = i >= 0 ? i : 0; }
 function fmtDate(d) { if (!d) return ""; try { return new Date(d + "T00:00").toLocaleDateString(undefined, { day: "numeric", month: "short", year: "numeric" }); } catch (e) { return d; } }
 
 function renderSvcSelect() {
   const sel = $("svcSelect"); sel.innerHTML = "";
-  DB.services.forEach((s, i) => { const o = document.createElement("option"); o.value = i; o.textContent = `${s.name || "Untitled"}${s.service_date ? " · " + fmtDate(s.service_date) : ""}`; sel.appendChild(o); });
+  if (!DB.services.length) { sel.innerHTML = `<option>No service</option>`; return; }
+  DB.services.forEach((s, i) => { const o = document.createElement("option"); o.value = i; o.textContent = `${s.name || "Untitled Service"}${s.service_date ? " · " + fmtDate(s.service_date) : ""}`; sel.appendChild(o); });
   sel.value = svcIdx;
 }
 $("svcSelect").onchange = (e) => { svcIdx = +e.target.value; songIdx = 0; cueIdx = -1; editIdx = -1; stopShowFx(); renderShow(); };
@@ -1149,11 +1150,6 @@ function renderService() {
 $("svcName").oninput = (e) => { svc().name = e.target.value; saveService(svc()); renderSvcSelect(); };
 $("svcDate").onchange = (e) => { svc().service_date = e.target.value; saveService(svc()); sortServices(); renderSvcSelect(); };
 $("svcNotes").oninput = (e) => { svc().notes = e.target.value; saveService(svc()); };
-$("svcNew").onclick = async () => {
-  const n = await ask("New service", "Sunday Service", "Service name"); if (!n) return;
-  const s = { id: uid(), name: n, service_date: new Date().toISOString().slice(0, 10), notes: "", songs: [], updated_at: new Date().toISOString() };
-  DB.services.push(s); sortServices(); svcIdx = DB.services.indexOf(s); songIdx = 0; cueIdx = -1; saveService(s); renderShow();
-};
 $("svcDup").onclick = async () => {
   const src = svc(); if (!src) return; const n = await ask("Name for the copy", src.name); if (!n) return;
   const s = JSON.parse(JSON.stringify(src)); s.id = uid(); s.name = n; s.service_date = new Date().toISOString().slice(0, 10); s.songs.forEach((x) => (x.id = uid()));
@@ -1163,17 +1159,144 @@ $("svcDel").onclick = async () => {
   const s = svc(); if (!s || !(await confirmBox(`Delete "${s.name}"?`, "This removes it for everyone.", "Delete", true))) return;
   DB.services.splice(svcIdx, 1); svcIdx = 0; songIdx = 0; cueIdx = -1;
   await deleteServiceRemote(s.id);
-  if (!DB.services.length) { const n = sampleService(); n.songs = []; DB.services.push(n); saveService(n); }
+  if (!DB.services.length) { const n = makeService(""); DB.services.push(n); saveService(n); }
   cacheLocal(); renderShow();
 };
 
+/* ---- ProPresenter-style playlist: services, items (songs + headers), library ---- */
+const HDR_COLS = { PreShow: "#3E5A2E", Music: "#2D4A63", Worship: "#2D4A63", Sermon: "#6A5236", Presentation: "#6A5236", Response: "#5A3B6B", Offering: "#2F5F5A", Ending: "#4A4A4A" };
+const HDR_SWATCHES = ["#3E5A2E", "#2D4A63", "#6A5236", "#5A3B6B", "#7A2E36", "#2F5F5A", "#4A4A4A"];
+const SVC_TEMPLATES = {
+  sunday: ["PreShow", "Worship", "Sermon", "Response"],
+  simple: ["Music"],
+  empty: [],
+};
+const isHdr = (it) => it && it.type === "header";
+function makeService(name, template = "sunday") {
+  const today = new Date(); const d = `${today.getFullYear()}-${String(today.getMonth() + 1).padStart(2, "0")}-${String(today.getDate()).padStart(2, "0")}`;
+  return { id: uid(), name: (name || "").trim() || "Untitled Service", service_date: d, notes: "", updated_at: new Date().toISOString(),
+    songs: (SVC_TEMPLATES[template] || []).map((h) => ({ id: uid(), type: "header", name: h, color: HDR_COLS[h] || "#4A4A4A" })) };
+}
+function addService(s) { DB.services.push(s); sortServices(); svcIdx = DB.services.indexOf(s); songIdx = 0; cueIdx = -1; editIdx = -1; saveService(s); renderShow(); }
+
+function createServiceSheet(opts = {}) {
+  const recent = [...DB.services].slice(0, 8);
+  return modal(`<div style="display:flex;align-items:center;gap:12px;margin-bottom:6px"><img src="icons/logo.png" alt="" style="width:44px;height:44px;border-radius:10px"><div><h2 style="margin:0">${opts.start ? "Start a service" : "New service"}</h2><p style="margin:0">Leave the name blank for "Untitled Service".</p></div></div>
+    <label>Service name<input type="text" id="nsName" placeholder="Untitled Service"></label>
+    <div class="row tight" style="gap:10px"><label style="flex:1">Date<input type="date" id="nsDate"></label>
+      <label style="flex:1">Template<select id="nsTpl"><option value="sunday">PreShow · Worship · Sermon · Response</option><option value="simple">Music only</option><option value="empty">Empty</option></select></label></div>
+    <div class="acts" style="margin-top:12px"><button class="btn" id="nsSkip">${opts.start ? (DB.services.length ? "Skip" : "Later") : "Cancel"}</button><button class="btn inv" id="nsGo">Create service</button></div>
+    ${opts.start && recent.length ? `<h3 class="sub" style="font-size:12px;color:var(--muted);letter-spacing:1.2px;text-transform:uppercase;margin:18px 0 6px">Or open</h3>
+      <div class="start-svc">${recent.map((s) => `<button class="btn" data-open="${s.id}"><span>${esc(s.name || "Untitled Service")}</span><small>${esc(fmtDate(s.service_date))} · ${(s.songs || []).filter((x) => !isHdr(x)).length} songs</small></button>`).join("")}</div>` : ""}`, (close) => {
+    const t = new Date(); $("nsDate").value = `${t.getFullYear()}-${String(t.getMonth() + 1).padStart(2, "0")}-${String(t.getDate()).padStart(2, "0")}`;
+    setTimeout(() => $("nsName").focus(), 50);
+    const go = () => { const s = makeService($("nsName").value, $("nsTpl").value); s.service_date = $("nsDate").value || s.service_date; close(true); addService(s); toast(`Created "${s.name}"`); };
+    $("nsGo").onclick = go; $("nsName").onkeydown = (e) => { if (e.key === "Enter") go(); };
+    $("nsSkip").onclick = () => close(false);
+    $("sheet").querySelectorAll("[data-open]").forEach((b) => (b.onclick = () => { svcIdx = DB.services.findIndex((s) => s.id === b.dataset.open); songIdx = 0; cueIdx = -1; close(true); renderShow(); }));
+  }).then((r) => { if (!DB.services.length) addService(makeService("")); return r; });
+}
+$("svcNew").onclick = () => createServiceSheet();
+
+function renderSvcList() {
+  const box = $("svcList"); box.innerHTML = "";
+  if (!DB.services.length) { box.innerHTML = `<div class="ps-empty">No services yet. Tap + to create one.</div>`; return; }
+  DB.services.forEach((s, i) => {
+    const el = document.createElement("div"); el.className = "ps-row" + (i === svcIdx ? " cur" : "");
+    el.innerHTML = `<span class="ps-i pl"></span><span class="t">${esc(s.name || "Untitled Service")}</span><span class="r">${esc(fmtDate(s.service_date))}</span>`;
+    el.onclick = () => { if (i === svcIdx) return; svcIdx = i; songIdx = 0; cueIdx = -1; editIdx = -1; takeOver(); renderShow(); };
+    box.appendChild(el);
+  });
+}
+function librarySongs() {
+  const map = new Map();
+  DB.services.forEach((s) => (s.songs || []).forEach((x) => { if (isHdr(x) || !x.name) return; const k = x.name.trim().toLowerCase();
+    const prev = map.get(k); if (!prev || (s.updated_at || "") > (prev.svc.updated_at || "")) map.set(k, { song: x, svc: s }); }));
+  return [...map.values()].sort((a, b) => a.song.name.localeCompare(b.song.name));
+}
+function renderLibList() {
+  const n = librarySongs().length, box = $("libList"); box.innerHTML = "";
+  const el = document.createElement("div"); el.className = "ps-row";
+  el.innerHTML = `<span class="ps-i lib">♪</span><span class="t">Songs</span><span class="r">${n}</span>`;
+  el.onclick = () => librarySheet(); box.appendChild(el);
+}
+function librarySheet() {
+  const all = librarySongs();
+  if (!all.length) { toast("The library fills up as you add songs to services."); return; }
+  modal(`<h2>Song library</h2><p>Every song you've used in any service, with its cues. Tap to add it to "${esc(svc()?.name || "this service")}".</p>
+    <input type="search" id="libQ" class="full" placeholder="Search songs">
+    <div class="list" id="libRes" style="margin-top:10px"></div><div class="acts"><button class="btn" id="mNo">Close</button></div>`, (close) => {
+    const draw = () => {
+      const q = $("libQ").value.trim().toLowerCase();
+      $("libRes").innerHTML = all.filter(({ song: x }) => !q || x.name.toLowerCase().includes(q)).map(({ song: x, svc: s }, j) =>
+        `<button class="btn" data-k="${esc(x.name)}" style="justify-content:space-between"><span>${esc(x.name)}</span><small class="hint">${x.bpm ? x.bpm + " BPM · " : ""}${x.cues?.length || 0} cues · ${esc(s.name)}</small></button>`).join("") || `<p class="hint">No match.</p>`;
+      $("libRes").querySelectorAll("[data-k]").forEach((b) => (b.onclick = () => {
+        const src = all.find(({ song: x }) => x.name === b.dataset.k).song; const c = JSON.parse(JSON.stringify(src)); c.id = uid();
+        insertItem(c); toast(`Added "${c.name}"`); close();
+      }));
+    };
+    $("libQ").oninput = draw; draw(); setTimeout(() => $("libQ").focus(), 50); $("mNo").onclick = () => close();
+  });
+}
+$("songCopyFrom").onclick = librarySheet;
+
+/* Insert after the selected item (so songs land under the header you picked) */
+function insertItem(it) {
+  if (!svc()) addService(makeService(""));
+  const a = svc().songs, at = a.length ? Math.min(songIdx + 1, a.length) : 0;
+  a.splice(at, 0, it); songIdx = at; cueIdx = -1; editIdx = -1; saveService(svc()); renderShow();
+}
+function headerSheet(h) {
+  const isNew = !h; h = h || { id: uid(), type: "header", name: "", color: HDR_SWATCHES[0] };
+  let col = h.color;
+  return modal(`<h2>${isNew ? "Add header" : "Edit header"}</h2>
+    <label>Name<input type="text" id="hdName" value="${esc(h.name)}" placeholder="e.g. PreShow, Worship, Sermon"></label>
+    <div class="chips">${Object.keys(HDR_COLS).map((n) => `<button class="btn sm" data-n="${n}">${n}</button>`).join("")}</div>
+    <div class="hint">Colour</div><div class="hdr-cols">${HDR_SWATCHES.map((c) => `<button data-c="${c}" style="background:${c}" class="${c === col ? "on" : ""}" aria-label="${c}"></button>`).join("")}</div>
+    <div class="acts">${isNew ? "" : `<button class="btn danger" id="hdDel">Delete</button><span class="flex"></span>`}<button class="btn" id="mNo">Cancel</button><button class="btn inv" id="mOk">${isNew ? "Add" : "Save"}</button></div>`, (close) => {
+    setTimeout(() => $("hdName").focus(), 50);
+    $("sheet").querySelectorAll("[data-n]").forEach((b) => (b.onclick = () => { $("hdName").value = b.dataset.n; col = HDR_COLS[b.dataset.n]; $("sheet").querySelectorAll("[data-c]").forEach((x) => x.classList.toggle("on", x.dataset.c === col)); }));
+    $("sheet").querySelectorAll("[data-c]").forEach((b) => (b.onclick = () => { col = b.dataset.c; $("sheet").querySelectorAll("[data-c]").forEach((x) => x.classList.toggle("on", x === b)); }));
+    $("mNo").onclick = () => close();
+    if ($("hdDel")) $("hdDel").onclick = () => { const a = svc().songs, i = a.indexOf(h); if (i >= 0) a.splice(i, 1); songIdx = Math.max(0, i - 1); saveService(svc()); renderShow(); close(); };
+    $("mOk").onclick = () => { h.name = $("hdName").value.trim() || "Header"; h.color = col; if (isNew) insertItem(h); else { saveService(svc()); renderShow(); } close(); };
+    $("hdName").onkeydown = (e) => { if (e.key === "Enter") $("mOk").click(); };
+  });
+}
+async function newSongFlow() {
+  if (!svc()) addService(makeService(""));
+  const r = await songSheet("Add song", {}); if (!r) return;
+  const cues = parseArrangement(r.arr);
+  insertItem({ id: uid(), name: r.name, note: r.note, bpm: r.bpm, arr: r.arr, cues: cues.length ? cues : [{ name: "Look 1", ...LOOK("color") }] });
+  toast(`Added "${r.name}" with ${cues.length} cues`);
+}
+$("songAdd").onclick = () => modal(`<h2>Add to ${esc(svc()?.name || "service")}</h2><p>New items go below the selected one.</p>
+  <div class="list"><button class="btn" id="aiSong">♪  New song (from arrangement)</button><button class="btn" id="aiLib">⌕  Song from library</button><button class="btn" id="aiHdr">▬  Header (PreShow, Worship, Sermon…)</button></div>
+  <div class="acts"><button class="btn" id="mNo">Cancel</button></div>`, (close) => {
+  $("mNo").onclick = () => close();
+  $("aiSong").onclick = () => { close(); setTimeout(newSongFlow, 30); };
+  $("aiLib").onclick = () => { close(); setTimeout(librarySheet, 30); };
+  $("aiHdr").onclick = () => { close(); setTimeout(() => headerSheet(), 30); };
+});
+
 function renderSetlist() {
   const box = $("setlist"); box.innerHTML = "";
-  const songs = svc()?.songs || [];
-  if (!songs.length) box.innerHTML = `<p class="hint">No songs yet. Tap <b>+ Song</b>.</p>`;
-  songs.forEach((s, i) => { const el = document.createElement("div"); el.className = "song" + (i === songIdx ? " cur" : "");
-    el.innerHTML = `<span class="n">${i + 1}</span><span class="t">${esc(s.name || "Untitled")}</span><span class="b">${s.bpm || ""}</span>`;
-    el.onclick = () => { songIdx = i; cueIdx = -1; editIdx = -1; stopShowFx(); renderShow(); }; box.appendChild(el); });
+  const items = svc()?.songs || [];
+  $("itemCount").textContent = `${items.length} ITEM${items.length === 1 ? "" : "S"}`;
+  if (!items.length) { box.innerHTML = `<div class="ps-empty">Empty. Tap + to add a song or header.</div>`; return; }
+  items.forEach((it, i) => {
+    const el = document.createElement("div");
+    if (isHdr(it)) {
+      el.className = "ps-hdr" + (i === songIdx ? " cur" : ""); el.style.setProperty("--h", it.color || "#4A4A4A");
+      el.innerHTML = `<span>${esc(it.name)}</span><span class="r">✎</span>`;
+      el.onclick = () => { if (i === songIdx) { headerSheet(it); return; } songIdx = i; cueIdx = -1; editIdx = -1; renderShow(); };
+    } else {
+      el.className = "ps-row" + (i === songIdx ? " cur" : "");
+      el.innerHTML = `<span class="ps-i doc"></span><span class="t">${esc(it.name || "Untitled")}</span><span class="r">${esc(it.note || (it.bpm ? it.bpm + " BPM" : ""))}</span>`;
+      el.onclick = () => { if (i === songIdx) return; songIdx = i; cueIdx = -1; editIdx = -1; takeOver(); renderShow(); };
+    }
+    box.appendChild(el);
+  });
 }
 const cueLook = (c) => (c.mode === "audio" ? { mode: "effect", bright: c.bright, speed: 75, info: { kind: c.audioMode === "chase" ? "chase" : c.audioMode === "drop" ? "strobe" : "breathe", colors: [c.color], dir: 1 } } : { ...c, effect: c.effect, speed: c.speed });
 /* ProPresenter-style groups: colour label per section */
@@ -1200,7 +1323,7 @@ $("modeEdit").onclick = () => setMode(true);
 function renderCues() {
   const s = song(), g = $("cueGrid"); g.innerHTML = "";
   $("liveSong").textContent = s ? s.name || "Untitled" : "No song";
-  if (!s) { $("liveCue").textContent = "Add a song to begin"; $("songName").value = ""; $("songNote").value = ""; $("songBpm").value = ""; $("cueEdit").hidden = true; return; }
+  if (!s) { const it = svc()?.songs[songIdx]; $("liveSong").textContent = isHdr(it) ? it.name : (svc() ? svc().name || "Untitled Service" : "No service"); $("liveCue").textContent = isHdr(it) ? "Header. Pick a song below it." : svc() ? "Add a song with + in the playlist" : "Create a service to begin"; $("songName").value = ""; $("songNote").value = ""; $("songBpm").value = ""; $("cueEdit").hidden = true; return; }
   if (document.activeElement !== $("songName")) $("songName").value = s.name || "";
   if (document.activeElement !== $("songNote")) $("songNote").value = s.note || "";
   if (document.activeElement !== $("songBpm")) $("songBpm").value = s.bpm || "";
@@ -1221,7 +1344,7 @@ function renderCues() {
   if (!s.cues.length && !editMode) g.innerHTML = `<p class="hint">This song has no cues. Switch to <b>Edit</b> to add some.</p>`;
   sweepStrips();
 }
-function renderShow() { renderSvcSelect(); renderService(); renderSetlist(); renderCues(); if (editIdx < 0) $("cueEdit").hidden = true; }
+function renderShow() { renderSvcSelect(); renderSvcList(); renderLibList(); renderService(); renderSetlist(); renderCues(); if (editIdx < 0) $("cueEdit").hidden = true; }
 
 /* Song meta */
 $("songName").oninput = (e) => { if (!song()) return; song().name = e.target.value; saveService(svc()); renderSetlist(); $("liveSong").textContent = e.target.value; };
@@ -1273,38 +1396,16 @@ function songSheet(title, init) {
       close({ name, bpm: clamp(+$("sgBpm").value || 100, 40, 220), note: $("sgNote").value.trim(), arr: $("sgArr").value.trim() }); };
   });
 }
-$("songAdd").onclick = async () => {
-  if (!svc()) return;
-  const r = await songSheet("Add song", {}); if (!r) return;
-  const cues = parseArrangement(r.arr);
-  svc().songs.push({ id: uid(), name: r.name, note: r.note, bpm: r.bpm, arr: r.arr, cues: cues.length ? cues : [{ name: "Look 1", ...LOOK("color") }] });
-  songIdx = svc().songs.length - 1; cueIdx = -1; editIdx = -1; saveService(svc()); renderShow();
-  toast(`Added "${r.name}" with ${cues.length} cues`);
-};
 $("songArr").onclick = async () => {
   const s = song(); if (!s) return;
   const r = await songSheet("Rebuild cues", { name: s.name, bpm: s.bpm, note: s.note, arr: s.arr || s.cues.map((c) => c.name.replace(/\s+/g, "")).join(" "), ok: "Rebuild" }); if (!r) return;
   if (!(await confirmBox("Replace this song's cues?", "Cues are rebuilt from the arrangement with default looks. Looks you set by hand will be replaced.", "Replace", true))) return;
   Object.assign(s, { name: r.name, bpm: r.bpm, note: r.note, arr: r.arr, cues: parseArrangement(r.arr) }); cueIdx = -1; editIdx = -1; saveService(svc()); renderShow();
 };
-$("songDup").onclick = () => { const s = song(); if (!s) return; const c = JSON.parse(JSON.stringify(s)); c.id = uid(); c.name += " (copy)"; svc().songs.splice(songIdx + 1, 0, c); songIdx++; saveService(svc()); renderShow(); };
-$("songDel").onclick = async () => { const s = song(); if (!s || !(await confirmBox(`Remove "${s.name}" from this service?`, "", "Remove", true))) return; svc().songs.splice(songIdx, 1); songIdx = Math.max(0, songIdx - 1); cueIdx = -1; editIdx = -1; saveService(svc()); renderShow(); };
+$("songDup").onclick = () => { const s = svc()?.songs[songIdx]; if (!s) return; const c = JSON.parse(JSON.stringify(s)); c.id = uid(); c.name += " (copy)"; svc().songs.splice(songIdx + 1, 0, c); songIdx++; saveService(svc()); renderShow(); };
+$("songDel").onclick = async () => { const s = svc()?.songs[songIdx]; if (!s || !(await confirmBox(`Remove "${s.name}" from this service?`, "", "Remove", true))) return; svc().songs.splice(songIdx, 1); songIdx = Math.max(0, songIdx - 1); cueIdx = -1; editIdx = -1; saveService(svc()); renderShow(); };
 $("songUp").onclick = () => moveSong(-1); $("songDown").onclick = () => moveSong(1);
-function moveSong(d) { const a = svc().songs, j = songIdx + d; if (j < 0 || j >= a.length) return; [a[songIdx], a[j]] = [a[j], a[songIdx]]; songIdx = j; saveService(svc()); renderSetlist(); }
-$("songCopyFrom").onclick = () => {
-  const others = DB.services.filter((s) => s !== svc() && s.songs.length);
-  if (!others.length) { toast("No other services with songs yet."); return; }
-  modal(`<h2>Copy a song</h2><p>Pick a song from a previous service. Its cues come with it.</p><div class="list">${others.map((s) =>
-    `<div class="hint" style="margin:10px 0 6px">${esc(s.name)} · ${esc(fmtDate(s.service_date))}</div>` + s.songs.map((x, j) => `<button class="btn" data-s="${s.id}" data-j="${j}">${esc(x.name)}</button>`).join("")).join("")}</div>
-    <div class="acts"><button class="btn" id="mNo">Close</button></div>`, (close) => {
-    $("mNo").onclick = () => close();
-    $("sheet").querySelectorAll("[data-s]").forEach((b) => (b.onclick = () => {
-      const src = DB.services.find((s) => s.id === b.dataset.s).songs[+b.dataset.j]; const c = JSON.parse(JSON.stringify(src)); c.id = uid();
-      svc().songs.push(c); songIdx = svc().songs.length - 1; cueIdx = -1; saveService(svc()); renderShow(); toast(`Added "${c.name}"`); close();
-    }));
-  });
-};
-
+function moveSong(d) { if (!svc()) return; const a = svc().songs, j = songIdx + d; if (j < 0 || j >= a.length) return; [a[songIdx], a[j]] = [a[j], a[songIdx]]; songIdx = j; saveService(svc()); renderSetlist(); }
 /* Cue editor */
 function fillEffectSelect() {
   const sel = $("ceEffect"); sel.innerHTML = ""; const seen = new Set();
@@ -1481,7 +1582,7 @@ sortServices();
 renderAll();
 log("Ready. Connect a light to begin.");
 const btp = bluetoothProblem(); if (btp) { showBtWarn(btp); log(btp.replace(/<[^>]+>/g, ""), "err"); }
-initCloud();
+initCloud().finally(() => createServiceSheet({ start: true }));
 
 if ("serviceWorker" in navigator && location.protocol !== "file:") navigator.serviceWorker.register("sw.js").catch(() => {});
 })();

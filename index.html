@@ -79,15 +79,21 @@
       <!-- SHOW (ProPresenter-style operator screen) -->
       <section class="view on" id="v-show">
         <div class="pp">
-          <div class="card pp-lib">
-            <div class="card-h"><h3>Setlist</h3><span class="flex"></span><button class="btn sm inv" id="songAdd">+ Song</button></div>
-            <div id="setlist"></div>
-            <div class="row"><button class="btn sm" id="songUp" aria-label="Move up">↑</button><button class="btn sm" id="songDown" aria-label="Move down">↓</button><button class="btn sm" id="songDup">Duplicate</button><button class="btn sm danger" id="songDel">Remove</button></div>
-            <button class="btn sm full" id="songCopyFrom">Copy a song from another service</button>
+          <div class="pp-lib pp-side">
+            <div class="ps-sec"><span>Library</span><span class="flex"></span><button class="ps-ico" id="songCopyFrom" title="Browse song library">⌕</button></div>
+            <div id="libList"></div>
+            <div class="ps-sec"><span>Playlist</span><span class="flex"></span><button class="ps-ico" id="svcNew" title="Create service">+</button></div>
+            <div id="svcList" class="ps-list"></div>
+            <div class="ps-items-h"><span id="itemCount">0 ITEMS</span><span class="flex"></span><button class="ps-ico" id="songAdd" title="Add item">+</button></div>
+            <div id="setlist" class="ps-items"></div>
+            <div class="ps-tools">
+              <button class="btn sm" id="songUp" aria-label="Move up">↑</button><button class="btn sm" id="songDown" aria-label="Move down">↓</button>
+              <button class="btn sm" id="songDup">Duplicate</button><button class="btn sm danger" id="songDel">Remove</button>
+            </div>
             <details class="svc-details">
               <summary>Service details</summary>
-              <input type="text" id="svcName" class="full" placeholder="Service name">
-              <div class="row"><input type="date" id="svcDate" class="flex"><button class="btn sm" id="svcNew">New</button><button class="btn sm" id="svcDup">Duplicate</button><button class="btn sm danger" id="svcDel">Delete</button></div>
+              <input type="text" id="svcName" class="full" placeholder="Untitled Service">
+              <div class="row"><input type="date" id="svcDate" class="flex"><button class="btn sm" id="svcDup">Duplicate</button><button class="btn sm danger" id="svcDel">Delete</button></div>
               <textarea id="svcNotes" class="full" rows="2" placeholder="Notes (team, theme, reminders)"></textarea>
             </details>
           </div>
