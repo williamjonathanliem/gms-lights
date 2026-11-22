@@ -447,10 +447,12 @@ requestAnimationFrame(frame);
 /* ---------------------------------------------------------------------
    6. LIGHT (one BLE controller)
    --------------------------------------------------------------------- */
+const WRITE_GAP_MS = 14;   // ~70 writes/s per light: fast, but below what these controllers choke on
 class Light {
   constructor(device) {
     this.device = device; this.id = device.id; this.name = device.name || "Unnamed";
-    this.char = null; this.queue = Promise.resolve(); this.pending = {}; this.status = "idle"; this.statusText = "";
+    this.char = null; this.status = "idle"; this.statusText = "";
+    this.q = []; this.lat = new Map(); this.sentSig = new Map(); this.busy = false; this.lastWrite = 0; this.fails = 0;
     this.state = { on: true, mode: "color", color: "#FFFFFF", bright: 100, speed: 80, effect: null, cct: 50 };
     device.addEventListener("gattserverdisconnected", () => this.onDisconnect());
   }
@@ -470,11 +472,12 @@ class Light {
     this.char = ch;
     if (/^(melk|modelx)/i.test(this.name)) {
       this.setStatus("busy", "Handshake…");
-      await this.raw(CMD.login1); await sleep(500);
-      await this.raw(CMD.login2); await sleep(500);
+      await this.raw(CMD.login1); await sleep(300);
+      await this.raw(CMD.login2); await sleep(300);
     }
+    this.lastWrite = performance.now();
     this.setStatus("ok", "Connected"); log(`${this.label}: connected`, "ok");
-    this.restore();
+    this.restore(); keepAwake();
   }
   async raw(bytes) {
     const data = new Uint8Array(bytes);
@@ -482,22 +485,42 @@ class Light {
     if (this.char.writeValueWithoutResponse) await this.char.writeValueWithoutResponse(data);
     else await this.char.writeValue(data);
   }
-  send(bytes) {
-    if (!this.char) return Promise.resolve();
-    this.queue = this.queue.then(() => this.raw(bytes)).catch((e) => log(`${this.label}: write failed: ${e.message}`, "err"));
-    return this.queue;
+  /* Writer: one write in flight at a time, paced so the controller isn't flooded.
+     send() = ordered commands (power, effect…). latest(key) = live values (colour, brightness…):
+     only the newest value per key is sent, stale ones are dropped, repeats are skipped.
+     This removes the build-up delay and the disconnects caused by write floods. */
+  send(bytes) { if (!this.char) return Promise.resolve(); this.q.push(bytes); this.sentSig.clear(); if (this.q.length > 60) this.q.splice(0, this.q.length - 60); this.pump(); return Promise.resolve(); }
+  latest(key, bytes) { if (!this.char) return; this.lat.delete(key); this.lat.set(key, bytes); this.pump(); }
+  dropLatest(key) { this.lat.delete(key); this.sentSig.delete(key); }
+  async pump() {
+    if (this.busy) return; this.busy = true;
+    try {
+      while (this.char) {
+        let b, key = null;
+        if (this.q.length) b = this.q.shift();
+        else if (this.lat.size) {
+          const [k, v] = this.lat.entries().next().value; this.lat.delete(k);
+          const sig = v.join(","); if (this.sentSig.get(k) === sig) continue;
+          key = k; b = v; this.sentSig.set(k, sig);
+        } else break;
+        const gap = WRITE_GAP_MS - (performance.now() - this.lastWrite); if (gap > 0) await sleep(gap);
+        try { await this.raw(b); this.fails = 0; }
+        catch (e) {
+          this.fails++; if (key) this.sentSig.delete(key);
+          if (this.char && this.fails < 4) { await sleep(25 * this.fails); try { await this.raw(b); this.fails = 0; } catch (e2) { log(`${this.label}: write failed: ${e2.message}`, "err"); } }
+        }
+        this.lastWrite = performance.now();
+      }
+    } finally { this.busy = false; }
   }
-  latest(key, bytes, ms = 50) {
-    const first = !(key in this.pending); this.pending[key] = bytes;
-    if (first) setTimeout(() => { const b = this.pending[key]; delete this.pending[key]; if (b) this.send(b); }, ms);
-  }
+  keepAlive() { if (this.char && performance.now() - this.lastWrite > 15000) this.send(CMD.bright(this._baked ? 100 : this.state.bright)); }
   ensureOn() { if (!this.state.on) { this.state.on = true; this.send(CMD.on()); } }
   /** Clear anything left over from the previous mode before a new look:
       controller mic mode, brightness baked into RGB by fades/beats/audio/FX. */
   prep() {
     if (this.state.mode === "mic") { this.send(CMD.micOff()); this.state.mode = "color"; }
     if (this._baked) { this._baked = false; this.send(CMD.bright(this.state.bright)); }
-    this._shown = null; delete this.pending.color;
+    this._shown = null; this.dropLatest("color");
   }
   /** Live output used by fades, beat pulses, audio and FX: brightness is baked into the RGB. */
   showRgb(rgb, throttle) {
@@ -521,7 +544,7 @@ class Light {
     if (rgbMix) this.latest("color", CMD.color(...cctRgbOf(v))); else this.latest("cct", CMD.cct(100 - v, v));
   }
   restore() {
-    const s = this.state; this._baked = false; this._shown = null; delete this.pending.color;
+    const s = this.state; this._baked = false; this._shown = null; this.dropLatest("color");
     this.send(s.on ? CMD.on() : CMD.off()); if (!s.on) return;
     if (s.mode === "effect" && s.effect != null) { this.send(CMD.effect(s.effect)); this.send(CMD.speed(s.speed)); }
     else if (s.mode === "cct") this.send(CMD.cct(100 - s.cct, s.cct));
@@ -529,14 +552,33 @@ class Light {
     this.send(CMD.bright(s.bright));
   }
   async onDisconnect() {
-    this.char = null; if (this.removed) return;
-    this.setStatus("bad", "Reconnecting…"); log(`${this.label}: disconnected`, "err");
-    for (let i = 0; i < 6 && !this.removed; i++) { await sleep(1200 * (i + 1)); try { await this.connect(); return; } catch (e) {} }
-    this.setStatus("bad", "Disconnected");
+    this.char = null; this.q = []; this.lat.clear(); this.sentSig.clear();
+    if (this.removed || this.reconnecting) return;
+    this.reconnecting = true; log(`${this.label}: disconnected, reconnecting`, "err");
+    // Keep trying quickly (0.3s, 0.6s, 1.2s … max 4s) until it's back or removed
+    for (let i = 0; !this.removed && !this.char; i++) {
+      this.setStatus("bad", i ? `Reconnecting… (${i})` : "Reconnecting…");
+      await sleep(Math.min(300 * 2 ** i, 4000));
+      if (document.hidden) { i = Math.min(i, 3); continue; }
+      try { await this.connect(); break; } catch (e) {}
+    }
+    this.reconnecting = false;
   }
   setStatus(k, t) { this.status = k; this.statusText = t; renderLights(); }
   disconnect() { this.removed = true; try { this.device.gatt.disconnect(); } catch (e) {} }
 }
+
+/* Keep the screen on while lights are connected (Android stops Bluetooth when it sleeps) */
+let wakeLock = null;
+async function keepAwake() {
+  try { if (!wakeLock && navigator.wakeLock && !document.hidden && lights.some((l) => l.char)) { wakeLock = await navigator.wakeLock.request("screen"); wakeLock.addEventListener("release", () => (wakeLock = null)); } } catch (e) {}
+}
+document.addEventListener("visibilitychange", () => {
+  if (document.hidden) return;
+  keepAwake();
+  lights.forEach((l) => { if (!l.char && !l.removed && !l.reconnecting) l.onDisconnect(); });
+});
+setInterval(() => lights.forEach((l) => l.keepAlive()), 5000);
 
 /* ---------------------------------------------------------------------
    7. LIGHTS PANE + TARGETING
@@ -649,7 +691,7 @@ $("tabs").onclick = (e) => {
   const v = e.target.dataset.v; if (!v) return;
   [...$("tabs").children].forEach((b) => b.classList.toggle("on", b === e.target));
   document.querySelectorAll(".view").forEach((s) => s.classList.toggle("on", s.id === "v-" + v));
-  if (v === "patterns") renderPatterns();
+  if (v === "patterns") { renderPatterns(); renderSw(); }
   if (v === "colour") drawWheel();
 };
 
@@ -710,7 +752,7 @@ wheel.onpointerup = wheel.onpointercancel = () => { if (dragging) commitRecent()
 });
 $("hex").onchange = (e) => { let v = e.target.value.trim(); if (!v.startsWith("#")) v = "#" + v;
   if (/^#([0-9a-f]{3}|[0-9a-f]{6})$/i.test(v)) { setColour({ hex: rgbToHex(...hexToRgb(v)) }); commitRecent(); } else toast("Use a hex like #FF8800"); };
-const SW = ["#FFFFFF", "#FFB066", "#FF0000", "#FF4000", "#FF8000", "#FFC800", "#FFFF00", "#80FF00", "#00FF00", "#00FF80", "#00FFFF", "#0080FF", "#0000FF", "#6000FF", "#B000FF", "#FF00C8"];
+const QUICK_SW = ["#FFFFFF", "#FFB066", "#FF0000", "#FF4000", "#FF8000", "#FFC800", "#FFFF00", "#80FF00", "#00FF00", "#00FF80", "#00FFFF", "#0080FF", "#0000FF", "#6000FF", "#B000FF", "#FF00C8"];
 function swatchGrid(el, list) { el.innerHTML = ""; list.forEach((c) => { const d = document.createElement("button"); d.className = "swatch"; d.style.background = c; d.setAttribute("aria-label", c);
   d.onclick = () => { setColour({ hex: c }); commitRecent(); }; el.appendChild(d); }); }
 
@@ -811,7 +853,7 @@ $("labAuto").onclick = () => {
 /* ---------------------------------------------------------------------
    11. LIVE CONTROL: takeover, transitions, FX, audio follow
    --------------------------------------------------------------------- */
-let xfTimer = null, rampTimer = null, holdFx = null, chase = null, audio = null;
+let xfTimer = null, rampTimer = null, holdFx = null, chase = null, audio = null, swfx = null;
 
 /** Stop everything that could still be driving the lights, so a new look starts clean.
     `keep` names the one engine that should keep running. */
@@ -821,6 +863,7 @@ function takeOver(keep = "") {
   if (keep !== "lab") stopLabAuto();
   if (keep !== "chase" && chase) stopChase(true);
   if (keep !== "fx" && holdFx) endHold(true);
+  if (keep !== "swfx" && swfx) stopSwFx(true);
   [...document.querySelectorAll("#micModes .on")].forEach((b) => b.classList.remove("on"));
 }
 
@@ -871,7 +914,7 @@ function endHold(quiet) {
   clearInterval(holdFx.timer); const T = holdFx.T; holdFx = null;
   document.querySelectorAll("[data-hold].on").forEach((b) => b.classList.remove("on"));
   if (quiet) return;
-  if (audio || chase || beatTimer) return;   // the running engine takes over again on its next tick
+  if (audio || chase || beatTimer || swfx) return;   // the running engine takes over again on its next tick
   T.forEach((l) => l.restore()); updateLightRows();
 }
 
@@ -917,6 +960,93 @@ document.querySelectorAll("[data-hold]").forEach((b) => {
   b.onpointerup = b.onpointercancel = () => endHold(false);
   b.oncontextmenu = (e) => e.preventDefault();
 });
+
+/* ---- Colour effects: patterns generated by the app, in any colours ---- */
+const SW_FX = {
+  breathe: ["Breathe", "breathe"], pulse: ["Pulse", "breathe"], fade: ["Colour fade", "fade"], jump: ["Jump", "jump"],
+  strobe: ["Strobe", "strobe"], police: ["Two-colour flash", "jump"], candle: ["Candle", "fire"], heartbeat: ["Heartbeat", "breathe"],
+  lightning: ["Lightning", "strobe"], sparkle: ["Sparkle", "party"], wave: ["Wave across lights", "wave"], rainbow: ["Rainbow", "rainbow"],
+};
+const SW_PRESETS = { Worship: ["#1E3CFF", "#6000FF", "#FF1E8C"], Warm: ["#FF5000", "#FFB066"], Ocean: ["#0040FF", "#00C8FF"], Christmas: ["#FF0000", "#00FF40"], Fire: ["#FF2000", "#FF8000"], White: ["#FFFFFF"] };
+const SW = Object.assign({ fx: "breathe", colors: ["#1E3CFF", "#FF1E8C"], spread: true }, local.get("sw", {}));
+const saveSw = () => local.set("sw", { fx: SW.fx, colors: SW.colors, spread: SW.spread });
+const gauss = (x, m, w) => Math.exp(-(((x - m) / w) ** 2));
+const hash1 = (n) => { const x = Math.sin(n * 127.1 + 311.7) * 43758.5453; return x - Math.floor(x); };
+/** One frame of a colour effect: returns [r,g,b] at 0-255 for light i of n at time t (seconds, already speed-scaled) */
+function swFrame(fx, P, t, i, n, spread) {
+  const L = P.length, C = (k) => P[((k % L) + L) % L], ph = spread && n > 1 ? i / n : 0, tt = t + ph * 2;
+  const scale = (c, k) => c.map((v) => Math.round(v * clamp(k, 0, 1)));
+  switch (fx) {
+    case "breathe": { const cyc = tt / 4, k = Math.pow((1 - Math.cos(2 * Math.PI * cyc)) / 2, 1.6); return scale(C(Math.floor(cyc)), 0.03 + 0.97 * k); }
+    case "pulse": { const p = tt % 1; return scale(C(Math.floor(tt)), Math.exp(-p * 5)); }
+    case "fade": { const f = tt / 3, k = Math.floor(f), e = (1 - Math.cos((f - k) * Math.PI)) / 2; const a = C(k), b = C(k + 1); return a.map((v, j) => Math.round(v + (b[j] - v) * e)); }
+    case "jump": return C(Math.floor(tt * 1.5));
+    case "strobe": return (tt * 8) % 1 < 0.3 ? C(Math.floor(tt * 2)) : [0, 0, 0];
+    case "police": { const p = (t * 2) % 1, half = p < 0.5, q = p % 0.5; const on = q < 0.09 || (q > 0.16 && q < 0.25); return on ? C(half ? 0 : 1) : [0, 0, 0]; }
+    case "candle": { const k = 0.62 + 0.18 * Math.sin(t * 7.3 + i) + 0.12 * Math.sin(t * 13.7 + i * 2) + 0.08 * Math.sin(t * 29.3); return scale(C(0), k); }
+    case "heartbeat": { const p = (tt % 1.2); return scale(C(0), Math.max(gauss(p, 0.08, 0.05), 0.7 * gauss(p, 0.32, 0.06), 0.06)); }
+    case "lightning": { const seg = Math.floor(t * 5), f = (t * 5) % 1, strike = hash1(seg + i * 0.37) > 0.8; return strike && f < 0.35 ? (f < 0.12 || f > 0.22 ? [255, 255, 255] : scale(C(0), 0.3)) : scale(C(0), 0.06); }
+    case "sparkle": { const seg = Math.floor(t * 8), r = hash1(seg * 13 + i * 7); return r > 0.55 ? C(Math.floor(r * 97)) : scale(C(0), 0.05); }
+    case "wave": { const k = (1 - Math.cos(2 * Math.PI * (t / 2 - i / Math.max(1, n)))) / 2; return scale(C(i), 0.05 + 0.95 * k); }
+    case "rainbow": return hsvToRgb(Math.round(t * 60 + (n > 1 ? i * 360 / n : 0)) % 360, 100, 100);
+  }
+  return C(0);
+}
+const swSpeedFactor = (v) => 0.25 + (v / 100) * 2.75;
+function startSwFx(T, fx, colors, opts = {}) {
+  if (!T.length) { toast(lights.length ? "Select at least one connected light." : "Connect a light first."); return; }
+  takeOver("swfx");
+  const P = (colors && colors.length ? colors : [liveHex()]).map(hexToRgb);
+  swfx = { T, fx, P, spread: opts.spread ?? SW.spread, speed: opts.speed, bright: opts.bright, t: 0, last: performance.now() };
+  T.forEach((l) => { l.state.mode = "color"; l.state.color = colors?.[0] || liveHex(); });
+  swfx.timer = setInterval(() => {
+    if (!swfx || holdFx) return;
+    const now = performance.now(), dt = (now - swfx.last) / 1000; swfx.last = now;
+    swfx.t += dt * swSpeedFactor(swfx.speed ?? +$("gSpeed").value);
+    const b = (swfx.bright ?? +$("gBright").value) / 100;
+    swfx.T.forEach((l, i) => l.showRgb(swFrame(swfx.fx, swfx.P, swfx.t, i, swfx.T.length, swfx.spread).map((v) => Math.round(v * b)), true));
+  }, 25);
+  document.querySelectorAll("#swList .sw-btn").forEach((x) => x.classList.toggle("on", x.dataset.fx === fx));
+  updateLightRows();
+}
+function stopSwFx(quiet) {
+  if (!swfx) return; clearInterval(swfx.timer); const T = swfx.T; swfx = null;
+  document.querySelectorAll("#swList .sw-btn.on").forEach((x) => x.classList.remove("on"));
+  if (!quiet) T.forEach((l) => l.restore());
+}
+/** Preview look for the on-screen strips (approximation using the preview engine) */
+const swLook = (fx, colors, bright = 100, speed = 60) => ({ mode: "effect", bright, speed, info: { kind: (SW_FX[fx] || SW_FX.breathe)[1], colors: colors && colors.length ? colors : [liveHex()], dir: 1 } });
+function renderSw() {
+  const box = $("swList"); box.innerHTML = "";
+  Object.entries(SW_FX).forEach(([k, [name]]) => {
+    const b = document.createElement("button"); b.className = "sw-btn" + (swfx?.fx === k ? " on" : ""); b.dataset.fx = k;
+    b.innerHTML = `<canvas class="strip"></canvas><b>${name}</b>`;
+    bindStrip(b.querySelector("canvas"), () => swLook(k, SW.colors, 100, +$("gSpeed").value));
+    b.onclick = () => { SW.fx = k; saveSw(); startSwFx(targets(), k, SW.colors); };
+    box.appendChild(b);
+  });
+  const pal = $("swPalette"); pal.innerHTML = "";
+  SW.colors.forEach((c, i) => {
+    const w = document.createElement("span"); w.className = "pal-chip";
+    w.innerHTML = `<input type="color" value="${c}" aria-label="Effect colour ${i + 1}"><button aria-label="Remove">✕</button>`;
+    w.querySelector("input").oninput = (e) => { SW.colors[i] = e.target.value.toUpperCase(); saveSw(); if (swfx) swfx.P = SW.colors.map(hexToRgb); };
+    w.querySelector("button").onclick = () => { if (SW.colors.length > 1) { SW.colors.splice(i, 1); saveSw(); if (swfx) swfx.P = SW.colors.map(hexToRgb); renderSw(); } };
+    pal.appendChild(w);
+  });
+  if (SW.colors.length < 6) { const a = document.createElement("button"); a.className = "btn sm"; a.textContent = "+"; a.onclick = () => { SW.colors.push(liveHex()); saveSw(); renderSw(); }; pal.appendChild(a); }
+  $("swSpread").checked = SW.spread;
+  sweepStrips();
+}
+Object.entries(SW_PRESETS).forEach(([k, cols]) => { const b = document.createElement("button"); b.className = "btn sm"; b.textContent = k;
+  b.onclick = () => { SW.colors = cols.slice(); saveSw(); if (swfx) swfx.P = SW.colors.map(hexToRgb); renderSw(); }; $("swPresets").appendChild(b); });
+$("swSpread").onchange = (e) => { SW.spread = e.target.checked; saveSw(); if (swfx) swfx.spread = SW.spread; };
+$("swStop").onclick = () => { stopSwFx(false); updateLightRows(); };
+$("swSave").onclick = async () => {
+  const n = await ask("Scene name", SW_FX[SW.fx][0], "e.g. Worship breathe"); if (!n) return;
+  DB.lib.scenes.push({ id: uid(), name: n, mode: "swfx", fx: SW.fx, colors: SW.colors.slice(), bright: +$("gBright").value, speed: +$("gSpeed").value });
+  saveLib("scenes"); renderScenes(); toast(`Saved scene "${n}"`);
+};
+Object.entries(SW_FX).forEach(([k, [n]]) => { const o = document.createElement("option"); o.value = k; o.textContent = n; $("ceSw").appendChild(o); });
 
 /* ---- Controller microphone (built into the light) ---- */
 $("micOn").onclick = () => { takeOver(); each((l) => { l.prep(); l.send(CMD.micOn()); }); };
@@ -996,11 +1126,12 @@ async function startAudio() {
   try {
     const stream = await navigator.mediaDevices.getUserMedia({ audio: { deviceId: AUD.deviceId ? { exact: AUD.deviceId } : undefined, echoCancellation: false, noiseSuppression: false, autoGainControl: false } });
     const ctx = new (window.AudioContext || window.webkitAudioContext)(); await ctx.resume?.();
-    const an = ctx.createAnalyser(); an.fftSize = 2048; an.smoothingTimeConstant = 0.15;
+    const an = ctx.createAnalyser(); an.fftSize = 1024; an.smoothingTimeConstant = 0;
     ctx.createMediaStreamSource(stream).connect(an);
     const binHz = ctx.sampleRate / an.fftSize, bin = (hz) => Math.max(1, Math.round(hz / binHz));
     audio = { ctx, stream, an, buf: new Uint8Array(an.frequencyBinCount), bins: { b0: bin(35), b1: bin(160), m1: bin(2000), h1: bin(8000) },
-      env: 0, slow: 0, bassAvg: 0.05, lastBeat: 0, ivs: [], bpm: 0, flash: 0, palIdx: 0, hue: 0, step: 0, tick: 0, last: 0, raf: 0, dropOn: false };
+      env: 0, slow: 0, peak: 0.05, prev: new Uint8Array(an.frequencyBinCount), td: new Float32Array(an.fftSize), flux: [],
+      lastBeat: 0, ivs: [], bpm: 0, flash: 0, palIdx: 0, hue: 0, step: 0, tick: 0, last: 0, raf: 0, dropOn: false };
     setAudioUi(true); listInputs(); log("Follow audio started", "ok"); audioLoop();
   } catch (e) { toast(e.name === "NotAllowedError" ? "Microphone permission was blocked. Allow it in the site settings." : "Couldn't open the microphone: " + e.message); log("Audio: " + e.message, "err"); }
 }
@@ -1026,27 +1157,36 @@ function audioLoop() {
   const band = (a, b) => { let s = 0; for (let i = a; i < b; i++) s += buf[i]; return s / Math.max(1, b - a) / 255; };
   const bass = band(bins.b0, bins.b1), mid = band(bins.b1, bins.m1), high = band(bins.m1, Math.min(bins.h1, buf.length)), all = band(bins.b0, Math.min(bins.h1, buf.length));
   const gain = +$("aGain").value / 100, floor = +$("aFloor").value / 100, sm = +$("aSmooth").value / 100, sens = +$("aSens").value / 100;
-  const raw = Math.min(1, all * 1.8 * gain);
-  A.env += (raw - A.env) * (raw > A.env ? 1 - sm * 0.7 : (1 - sm) * 0.3);
-  A.slow += (raw - A.slow) * 0.03;
+  const now = performance.now();
+  // Loudness from the raw waveform (RMS): reacts within one frame, no FFT lag
+  A.an.getFloatTimeDomainData(A.td); let sq = 0; for (let i = 0; i < A.td.length; i++) sq += A.td[i] * A.td[i];
+  let raw = Math.sqrt(sq / A.td.length) * 4 * gain;
+  // Auto level: follow the loudest recent level so quiet rooms and loud bands both fill the range
+  if ($("aAuto").checked) { A.peak = Math.max(raw, A.peak * 0.9985, 0.02); raw = raw / A.peak; }
+  raw = Math.min(1, raw);
+  // Instant attack, release set by Smoothing
+  A.env = raw > A.env ? raw : A.env + (raw - A.env) * (0.04 + (1 - sm) * 0.45);
+  A.slow += (raw - A.slow) * 0.035;
   const lvl = clamp((A.env - floor) / Math.max(0.05, 1 - floor), 0, 1);
-  // Beat detection on bass energy against its running average
-  const now = performance.now(), e = bass * gain;
-  const thr = A.bassAvg * (1.08 + (1 - sens) * 0.9) + 0.015;
-  if (e > thr && e > 0.06 && now - A.lastBeat > 280) {
-    if (A.lastBeat) { const iv = now - A.lastBeat; if (iv < 1500) { A.ivs.push(iv); if (A.ivs.length > 12) A.ivs.shift(); } }
+  // Beat detection: spectral flux (sudden rises) in kick + snare bands, against an adaptive threshold
+  let fl = 0; for (let i = bins.b0; i < bins.m1; i++) { const d = buf[i] - A.prev[i]; if (d > 0) fl += i < bins.b1 ? d * 2 : d * 0.5; }
+  A.prev.set(buf); fl /= (bins.m1 - bins.b0) * 255;
+  A.flux.push(fl); if (A.flux.length > 45) A.flux.shift();
+  const mean = A.flux.reduce((x, y) => x + y, 0) / A.flux.length, sd = Math.sqrt(A.flux.reduce((x, y) => x + (y - mean) ** 2, 0) / A.flux.length);
+  const thr = mean + (0.6 + (1 - sens) * 2.2) * sd;
+  if (fl > thr && fl > 0.004 && now - A.lastBeat > 200) {
+    if (A.lastBeat) { const iv = now - A.lastBeat; if (iv < 1500) { A.ivs.push(iv); if (A.ivs.length > 16) A.ivs.shift(); } }
     A.lastBeat = now; A.flash = 1; A.palIdx++; A.step++;
     if (A.ivs.length >= 4) { const sorted = [...A.ivs].sort((a, b) => a - b); let bpm = 60000 / sorted[sorted.length >> 1]; while (bpm < 70) bpm *= 2; while (bpm > 180) bpm /= 2; A.bpm = Math.round(bpm); $("audBpm").textContent = A.bpm; }
     const d = $("audBeat"); d.classList.add("hit"); setTimeout(() => d.classList.remove("hit"), 80);
   }
-  A.bassAvg += (e - A.bassAvg) * 0.04;
-  A.flash *= 0.88;
+  A.flash *= 0.86;
   // Meters
   $("aMeter").style.width = Math.round(lvl * 100) + "%"; $("audioToggle").style.setProperty("--lvl", Math.round(lvl * 100) + "%");
   if (A.tick++ % 2 === 0) { const c = $("spec"), g = c.getContext("2d"); g.clearRect(0, 0, c.width, c.height);
     for (let i = 0; i < 64; i++) { const v = buf[Math.floor(bins.b0 + i * (bins.h1 - bins.b0) / 64)] / 255; g.fillStyle = `rgba(255,255,255,${0.25 + v * 0.75})`; g.fillRect(i * (c.width / 64) + 1, c.height * (1 - v), c.width / 64 - 2, c.height * v); } }
-  // Output to lights ~20 fps
-  if (now - A.last < 50 || holdFx) return; A.last = now;
+  // Output to lights ~40 fps (the writer always sends the newest frame and drops stale ones)
+  if (now - A.last < 25 || holdFx) return; A.last = now;
   const T = audioTargets(); if (!T.length) return;
   const minB = +$("aMin").value, maxB = +$("aMax").value, briOf = (k) => minB + (maxB - minB) * clamp(k, 0, 1);
   A.hue = (A.hue + 0.4 + lvl * 5) % 360;
@@ -1087,13 +1227,13 @@ $("liveColor").onchange = commitRecent;
 /* ---------------------------------------------------------------------
    12. SCENES (shared library)
    --------------------------------------------------------------------- */
-const lookDesc = (c) => c.mode === "effect" ? patLabel(c.effect) : c.mode === "cct" ? `White ${kOf(c.cct)}K` : c.mode === "off" ? "Off" : c.mode === "audio" ? `♪ ${(AUD_MODES[c.audioMode || "pulse"] || ["Audio"])[0]}` : c.color;
+const lookDesc = (c) => c.mode === "swfx" ? (SW_FX[c.fx || c.sw] || ["Colour effect"])[0] : c.mode === "effect" ? patLabel(c.effect) : c.mode === "cct" ? `White ${kOf(c.cct)}K` : c.mode === "off" ? "Off" : c.mode === "audio" ? `♪ ${(AUD_MODES[c.audioMode || "pulse"] || ["Audio"])[0]}` : c.color;
 function renderScenes() {
   const g = $("sceneGrid"); g.innerHTML = "";
   (DB.lib.scenes || []).forEach((s, i) => {
     const el = document.createElement("div"); el.className = "scene";
     el.innerHTML = `<canvas class="strip"></canvas><button class="x" aria-label="Delete">✕</button><div class="t">${esc(s.name)}</div><div class="d">${esc(lookDesc(s))} · ${s.bright}%</div>`;
-    bindStrip(el.querySelector("canvas"), () => s);
+    bindStrip(el.querySelector("canvas"), () => (s.mode === "swfx" ? swLook(s.fx, s.colors, s.bright, s.speed) : s));
     el.onclick = async (e) => {
       if (e.target.closest(".x")) { if (await confirmBox(`Delete scene "${s.name}"?`, "", "Delete", true)) { DB.lib.scenes.splice(i, 1); saveLib("scenes"); renderScenes(); } return; }
       applyLookTo(targets(), s, true);
@@ -1110,6 +1250,7 @@ $("sceneSave").onclick = async () => {
 };
 function applyLookTo(T, s, syncUi) {
   if (!T.length) { toast(lights.length ? "Select at least one connected light." : "Connect a light first."); return; }
+  if (s.mode === "swfx") { startSwFx(T, s.fx, s.colors, { speed: s.speed, bright: s.bright }); if (syncUi) { $("gBright").value = s.bright; $("gBrightV").textContent = s.bright; } return; }
   takeOver();
   if (s.mode === "color" && transitionSecs() > 0) {
     T.forEach((l) => { l.state.speed = s.speed ?? l.state.speed; l.state.bright = s.bright; });
@@ -1285,7 +1426,7 @@ function renderSetlist() {
     box.appendChild(el);
   });
 }
-const cueLook = (c) => (c.mode === "audio" ? { mode: "effect", bright: c.bright, speed: 75, info: { kind: c.audioMode === "chase" ? "chase" : c.audioMode === "drop" ? "strobe" : "breathe", colors: [c.color], dir: 1 } } : { ...c, effect: c.effect, speed: c.speed });
+const cueLook = (c) => (c.mode === "swfx" ? swLook(c.sw || "breathe", [c.color, c.color2 || c.color], c.bright, c.speed) : c.mode === "audio" ? { mode: "effect", bright: c.bright, speed: 75, info: { kind: c.audioMode === "chase" ? "chase" : c.audioMode === "drop" ? "strobe" : "breathe", colors: [c.color], dir: 1 } } : { ...c, effect: c.effect, speed: c.speed });
 /* ProPresenter-style groups: colour label per section */
 const GROUPS_PP = [
   [/pre.?chorus|^pc\b|lift|build/i, "Pre-Chorus", "#E07B2E"],
@@ -1410,7 +1551,7 @@ function openEditor(i) {
   editIdx = i; const c = song()?.cues[i]; if (!c) return; fillEffectSelect();
   $("cueEdit").hidden = false; $("ceName").value = c.name; $("ceMode").value = c.mode; $("ceColor").value = c.color; $("ceEffect").value = c.effect;
   $("ceCct").value = c.cct; $("ceBright").value = c.bright; $("ceBrightV").textContent = c.bright + "%"; $("ceSpeed").value = c.speed; $("ceSpeedV").textContent = c.speed + "%";
-  $("ceFade").value = c.fade; $("ceBeat").value = c.beat; $("ceWho").value = c.who || "sel"; $("ceAudio").value = c.audioMode || "pulse";
+  $("ceFade").value = c.fade; $("ceBeat").value = c.beat; $("ceWho").value = c.who || "sel"; $("ceAudio").value = c.audioMode || "pulse"; $("ceSw").value = c.sw || "breathe"; $("ceColor2").value = c.color2 || "#FF1E8C";
   fillPreviewFields(c.effect); showModeFields(c.mode); renderCues();
   $("cueEdit").scrollIntoView({ behavior: "smooth", block: "nearest" });
 }
@@ -1426,10 +1567,10 @@ bindStrip($("cePreviewStrip"), () => { const c = song()?.cues[editIdx]; return c
 function editCue() {
   const c = song()?.cues[editIdx]; if (!c) return;
   Object.assign(c, { name: $("ceName").value || "Cue", mode: $("ceMode").value, color: $("ceColor").value.toUpperCase(), effect: +$("ceEffect").value, cct: +$("ceCct").value,
-    bright: +$("ceBright").value, speed: +$("ceSpeed").value, fade: clamp(+$("ceFade").value || 0, 0, 20), beat: $("ceBeat").value, who: $("ceWho").value, audioMode: $("ceAudio").value });
+    bright: +$("ceBright").value, speed: +$("ceSpeed").value, fade: clamp(+$("ceFade").value || 0, 0, 20), beat: $("ceBeat").value, who: $("ceWho").value, audioMode: $("ceAudio").value, sw: $("ceSw").value, color2: $("ceColor2").value.toUpperCase() });
   $("ceBrightV").textContent = c.bright + "%"; $("ceSpeedV").textContent = c.speed + "%"; showModeFields(c.mode); saveService(svc()); renderCues();
 }
-["ceName", "ceMode", "ceColor", "ceEffect", "ceCct", "ceBright", "ceSpeed", "ceFade", "ceBeat", "ceWho", "ceAudio"].forEach((id) => { $(id).addEventListener("input", editCue); $(id).addEventListener("change", editCue); });
+["ceName", "ceMode", "ceColor", "ceEffect", "ceCct", "ceBright", "ceSpeed", "ceFade", "ceBeat", "ceWho", "ceAudio", "ceSw", "ceColor2"].forEach((id) => { $(id).addEventListener("input", editCue); $(id).addEventListener("change", editCue); });
 $("ceClose").onclick = () => { editIdx = -1; $("cueEdit").hidden = true; renderCues(); };
 $("ceTry").onclick = () => goCue(editIdx);
 $("ceDel").onclick = async () => { if (!(await confirmBox("Delete this cue?", "", "Delete", true))) return; song().cues.splice(editIdx, 1); editIdx = -1; cueIdx = -1; saveService(svc()); renderShow(); };
@@ -1453,6 +1594,7 @@ function goCue(i) {
   const T = cueTargets(c);
   if (!T.length) { toast(lights.length ? "No target lights for this cue. Check your selection." : "Connect a light to run cues."); return; }
   if (c.mode === "off") T.forEach((l) => l.power(false));
+  else if (c.mode === "swfx") { startSwFx(T, c.sw || "breathe", [c.color, c.color2 || c.color], { speed: c.speed, bright: c.bright }); }
   else if (c.mode === "audio") {
     AUD.mode = c.audioMode || "pulse"; AUD.source = "live"; AUD.who = c.who || "sel"; AUD.max = c.bright; syncAudioUi();
     setColour({ hex: c.color }, false);
@@ -1680,7 +1822,7 @@ function renderAll(keepEditor) {
   if (keepEditor && editIdx >= 0 && song()?.cues[editIdx]) openEditor(editIdx);
 }
 
-swatchGrid($("swatches"), SW);
+swatchGrid($("swatches"), QUICK_SW);
 setColour({ hex: "#FFFFFF" }, false);
 labSet(0, false);
 syncAudioUi(); $("audWho").value = AUD.who;

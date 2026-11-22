@@ -133,8 +133,10 @@
               <div class="card-h"><h3>Edit cue</h3><span class="flex"></span><button class="btn sm inv" id="ceClose">Done</button></div>
               <div class="ed-grid">
                 <label>Name<input type="text" id="ceName"></label>
-                <label>Look<select id="ceMode"><option value="color">Colour</option><option value="effect">Pattern</option><option value="cct">White</option><option value="audio">Follow audio</option><option value="off">Off</option></select></label>
-                <label data-m="color audio">Colour<input type="color" id="ceColor"></label>
+                <label>Look<select id="ceMode"><option value="color">Colour</option><option value="effect">Pattern</option><option value="cct">White</option><option value="swfx">Colour effect</option><option value="audio">Follow audio</option><option value="off">Off</option></select></label>
+                <label data-m="swfx">Effect<select id="ceSw"></select></label>
+                <label data-m="color audio swfx">Colour<input type="color" id="ceColor"></label>
+                <label data-m="swfx">Colour 2<input type="color" id="ceColor2"></label>
                 <label data-m="audio">Audio mode<select id="ceAudio"><option value="pulse">Pulse</option><option value="beat">Beat flash</option><option value="breathe">Breathe</option><option value="drop">Drop strobe</option><option value="chase">Beat chase</option></select></label>
                 <label data-m="effect">Pattern<select id="ceEffect"></select></label>
                 <label data-m="effect">Preview style<select id="ceKind"></select></label>
@@ -227,6 +229,17 @@
 
       <!-- PATTERNS -->
       <section class="view" id="v-patterns">
+        <div class="card" style="margin-bottom:14px">
+          <div class="card-h"><h3>Colour effects</h3><span class="flex"></span><span class="hint">Run by the app, so you choose the colours</span></div>
+          <div class="sw-grid" id="swList"></div>
+          <h3 class="sub">Colours</h3>
+          <div class="pal" id="swPalette"></div>
+          <div class="chips" id="swPresets"></div>
+          <div class="row"><label class="check"><input type="checkbox" id="swSpread" checked> Offset across lights</label><span class="flex"></span>
+            <span class="hint">Speed &amp; brightness: top bar</span>
+            <button class="btn sm" id="swSave">Save as scene</button><button class="btn sm danger" id="swStop">Stop</button></div>
+        </div>
+        <h3 class="sub" style="font-size:12px;color:var(--muted);letter-spacing:1.2px;text-transform:uppercase;margin:6px 0 10px">Built-in patterns (controller)</h3>
         <div class="card lab">
           <div class="card-h"><h3>Pattern lab</h3><span class="flex"></span><span class="hint">Step through codes, watch the strip, then name it to match the app</span></div>
           <div class="lab-row">
@@ -281,10 +294,11 @@
           </div>
           <div class="card">
             <h3>Response</h3>
-            <div class="field"><label>Gain</label><input type="range" id="aGain" min="10" max="400" value="140"><output id="aGainV">1.4×</output></div>
-            <div class="field"><label>Noise floor</label><input type="range" id="aFloor" min="0" max="80" value="8"><output id="aFloorV">8</output></div>
-            <div class="field"><label>Smoothing</label><input type="range" id="aSmooth" min="0" max="95" value="45"><output id="aSmoothV">45</output></div>
-            <div class="field"><label>Beat sens.</label><input type="range" id="aSens" min="0" max="100" value="55"><output id="aSensV">55</output></div>
+            <label class="check" style="margin-bottom:6px"><input type="checkbox" id="aAuto" checked> Auto level (adapts to quiet and loud rooms)</label>
+            <div class="field"><label>Gain</label><input type="range" id="aGain" min="10" max="400" value="180"><output id="aGainV">1.8×</output></div>
+            <div class="field"><label>Noise floor</label><input type="range" id="aFloor" min="0" max="80" value="4"><output id="aFloorV">4</output></div>
+            <div class="field"><label>Smoothing</label><input type="range" id="aSmooth" min="0" max="95" value="25"><output id="aSmoothV">25</output></div>
+            <div class="field"><label>Beat sens.</label><input type="range" id="aSens" min="0" max="100" value="72"><output id="aSensV">72</output></div>
             <div class="field"><label>Min bright</label><input type="range" id="aMin" min="0" max="60" value="5"><output id="aMinV">5</output></div>
             <div class="field"><label>Max bright</label><input type="range" id="aMax" min="10" max="100" value="100"><output id="aMaxV">100</output></div>
             <div class="meter"><i id="aMeter"></i></div>
