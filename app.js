@@ -1143,27 +1143,20 @@ function renderSvcSelect() {
   sel.value = svcIdx;
 }
 $("svcSelect").onchange = (e) => { svcIdx = +e.target.value; songIdx = 0; cueIdx = -1; editIdx = -1; stopShowFx(); renderShow(); };
-function renderService() {
-  const s = svc(); if (!s) return;
-  if (document.activeElement !== $("svcName")) $("svcName").value = s.name || "";
-  $("svcDate").value = s.service_date || "";
-  if (document.activeElement !== $("svcNotes")) $("svcNotes").value = s.notes || "";
-}
-$("svcName").oninput = (e) => { svc().name = e.target.value; saveService(svc()); renderSvcSelect(); };
-$("svcDate").onchange = (e) => { svc().service_date = e.target.value; saveService(svc()); sortServices(); renderSvcSelect(); };
-$("svcNotes").oninput = (e) => { svc().notes = e.target.value; saveService(svc()); };
-$("svcDup").onclick = async () => {
+function renderService() {}
+async function dupService() {
   const src = svc(); if (!src) return; const n = await ask("Name for the copy", src.name); if (!n) return;
   const s = JSON.parse(JSON.stringify(src)); s.id = uid(); s.name = n; s.service_date = new Date().toISOString().slice(0, 10); s.songs.forEach((x) => (x.id = uid()));
   DB.services.push(s); sortServices(); svcIdx = DB.services.indexOf(s); saveService(s); renderShow(); toast("Service duplicated");
-};
-$("svcDel").onclick = async () => {
+}
+async function deleteService() {
   const s = svc(); if (!s || !(await confirmBox(`Delete "${s.name}"?`, "This removes it for everyone.", "Delete", true))) return;
   DB.services.splice(svcIdx, 1); svcIdx = 0; songIdx = 0; cueIdx = -1;
   await deleteServiceRemote(s.id);
   if (!DB.services.length) { const n = makeService(""); DB.services.push(n); saveService(n); }
   cacheLocal(); renderShow();
-};
+}
+$("svcMore").onclick = () => serviceMenu(svcIdx);
 
 /* ---- ProPresenter-style playlist: services, items (songs + headers), library ---- */
 const HDR_COLS = { PreShow: "#3E5A2E", Music: "#2D4A63", Worship: "#2D4A63", Sermon: "#6A5236", Presentation: "#6A5236", Response: "#5A3B6B", Offering: "#2F5F5A", Ending: "#4A4A4A" };
@@ -1186,13 +1179,13 @@ function createServiceSheet(opts = {}) {
   return modal(`<div style="display:flex;align-items:center;gap:12px;margin-bottom:6px"><img src="icons/logo.png" alt="" style="width:44px;height:44px;border-radius:10px"><div><h2 style="margin:0">${opts.start ? "Start a service" : "New service"}</h2><p style="margin:0">Leave the name blank for "Untitled Service".</p></div></div>
     <label>Service name<input type="text" id="nsName" placeholder="Untitled Service"></label>
     <div class="row tight" style="gap:10px"><label style="flex:1">Date<input type="date" id="nsDate"></label>
-      <label style="flex:1">Template<select id="nsTpl"><option value="sunday">PreShow · Worship · Sermon · Response</option><option value="simple">Music only</option><option value="empty">Empty</option></select></label></div>
+</div>
     <div class="acts" style="margin-top:12px"><button class="btn" id="nsSkip">${opts.start ? (DB.services.length ? "Skip" : "Later") : "Cancel"}</button><button class="btn inv" id="nsGo">Create service</button></div>
     ${opts.start && recent.length ? `<h3 class="sub" style="font-size:12px;color:var(--muted);letter-spacing:1.2px;text-transform:uppercase;margin:18px 0 6px">Or open</h3>
       <div class="start-svc">${recent.map((s) => `<button class="btn" data-open="${s.id}"><span>${esc(s.name || "Untitled Service")}</span><small>${esc(fmtDate(s.service_date))} · ${(s.songs || []).filter((x) => !isHdr(x)).length} songs</small></button>`).join("")}</div>` : ""}`, (close) => {
     const t = new Date(); $("nsDate").value = `${t.getFullYear()}-${String(t.getMonth() + 1).padStart(2, "0")}-${String(t.getDate()).padStart(2, "0")}`;
     setTimeout(() => $("nsName").focus(), 50);
-    const go = () => { const s = makeService($("nsName").value, $("nsTpl").value); s.service_date = $("nsDate").value || s.service_date; close(true); addService(s); toast(`Created "${s.name}"`); };
+    const go = () => { const s = makeService($("nsName").value, "empty"); s.service_date = $("nsDate").value || s.service_date; close(true); addService(s); toast(`Created "${s.name}"`); };
     $("nsGo").onclick = go; $("nsName").onkeydown = (e) => { if (e.key === "Enter") go(); };
     $("nsSkip").onclick = () => close(false);
     $("sheet").querySelectorAll("[data-open]").forEach((b) => (b.onclick = () => { svcIdx = DB.services.findIndex((s) => s.id === b.dataset.open); songIdx = 0; cueIdx = -1; close(true); renderShow(); }));
@@ -1241,12 +1234,11 @@ function librarySheet() {
     $("libQ").oninput = draw; draw(); setTimeout(() => $("libQ").focus(), 50); $("mNo").onclick = () => close();
   });
 }
-$("songCopyFrom").onclick = librarySheet;
 
 /* Insert after the selected item (so songs land under the header you picked) */
 function insertItem(it) {
   if (!svc()) addService(makeService(""));
-  const a = svc().songs, at = a.length ? Math.min(songIdx + 1, a.length) : 0;
+  const a = svc().songs, at = a.length;
   a.splice(at, 0, it); songIdx = at; cueIdx = -1; editIdx = -1; saveService(svc()); renderShow();
 }
 function headerSheet(h) {
@@ -1268,36 +1260,28 @@ function headerSheet(h) {
 }
 async function newSongFlow() {
   if (!svc()) addService(makeService(""));
-  const r = await songSheet("Add song", {}); if (!r) return;
+  const lib = librarySongs();
+  const r = await songSheet("Add song", { reuse: lib }); if (!r) return;
+  if (r.reuse) {
+    const src = lib.find(({ song: x }) => x.name === r.reuse)?.song;
+    if (src) { const c = JSON.parse(JSON.stringify(src)); c.id = uid(); Object.assign(c, { name: r.name, bpm: r.bpm, note: r.note }); insertItem(c); toast(`Added "${c.name}" with its saved cues`); return; }
+  }
   const cues = parseArrangement(r.arr);
   insertItem({ id: uid(), name: r.name, note: r.note, bpm: r.bpm, arr: r.arr, cues: cues.length ? cues : [{ name: "Look 1", ...LOOK("color") }] });
   toast(`Added "${r.name}" with ${cues.length} cues`);
 }
-$("songAdd").onclick = () => modal(`<h2>Add to ${esc(svc()?.name || "service")}</h2><p>New items go below the selected one.</p>
-  <div class="list"><button class="btn" id="aiSong">♪  New song (from arrangement)</button><button class="btn" id="aiLib">⌕  Song from library</button><button class="btn" id="aiHdr">▬  Header (PreShow, Worship, Sermon…)</button></div>
-  <div class="acts"><button class="btn" id="mNo">Cancel</button></div>`, (close) => {
-  $("mNo").onclick = () => close();
-  $("aiSong").onclick = () => { close(); setTimeout(newSongFlow, 30); };
-  $("aiLib").onclick = () => { close(); setTimeout(librarySheet, 30); };
-  $("aiHdr").onclick = () => { close(); setTimeout(() => headerSheet(), 30); };
-});
+$("songAdd").onclick = () => newSongFlow();
 
 function renderSetlist() {
   const box = $("setlist"); box.innerHTML = "";
   const items = svc()?.songs || [];
-  $("itemCount").textContent = `${items.length} ITEM${items.length === 1 ? "" : "S"}`;
-  if (!items.length) { box.innerHTML = `<div class="ps-empty">Empty. Tap + to add a song or header.</div>`; return; }
+  if (!items.some((x) => !isHdr(x))) { box.innerHTML = `<p class="hint">No songs yet. Tap <b>+ Song</b>.</p>`; return; }
+  let n = 0;
   items.forEach((it, i) => {
-    const el = document.createElement("div");
-    if (isHdr(it)) {
-      el.className = "ps-hdr" + (i === songIdx ? " cur" : ""); el.style.setProperty("--h", it.color || "#4A4A4A");
-      el.innerHTML = `<span>${esc(it.name)}</span><span class="r">✎</span>`;
-      el.onclick = () => { if (i === songIdx) { headerSheet(it); return; } songIdx = i; cueIdx = -1; editIdx = -1; renderShow(); };
-    } else {
-      el.className = "ps-row" + (i === songIdx ? " cur" : "");
-      el.innerHTML = `<span class="ps-i doc"></span><span class="t">${esc(it.name || "Untitled")}</span><span class="r">${esc(it.note || (it.bpm ? it.bpm + " BPM" : ""))}</span>`;
-      el.onclick = () => { if (i === songIdx) return; songIdx = i; cueIdx = -1; editIdx = -1; takeOver(); renderShow(); };
-    }
+    if (isHdr(it)) return;
+    const el = document.createElement("div"); el.className = "song" + (i === songIdx ? " cur" : "");
+    el.innerHTML = `<span class="n">${++n}</span><span class="t">${esc(it.name || "Untitled")}</span><span class="b">${it.bpm ? it.bpm : ""}</span>`;
+    el.onclick = () => { if (i === songIdx) return; songIdx = i; cueIdx = -1; editIdx = -1; takeOver(); renderShow(); };
     box.appendChild(el);
   });
 }
@@ -1326,7 +1310,7 @@ $("modeEdit").onclick = () => setMode(true);
 function renderCues() {
   const s = song(), g = $("cueGrid"); g.innerHTML = "";
   $("liveSong").textContent = s ? s.name || "Untitled" : "No song";
-  if (!s) { const it = svc()?.songs[songIdx]; $("liveSong").textContent = isHdr(it) ? it.name : (svc() ? svc().name || "Untitled Service" : "No service"); $("liveCue").textContent = isHdr(it) ? "Header. Pick a song below it." : svc() ? "Add a song with + in the playlist" : "Create a service to begin"; $("songName").value = ""; $("songNote").value = ""; $("songBpm").value = ""; $("cueEdit").hidden = true; return; }
+  if (!s) { const it = svc()?.songs[songIdx]; $("liveSong").textContent = isHdr(it) ? it.name : (svc() ? svc().name || "Untitled Service" : "No service"); $("liveCue").textContent = isHdr(it) ? "Header. Pick a song below it." : svc() ? "Add a song with + Song" : "Create a service with + New"; $("songName").value = ""; $("songNote").value = ""; $("songBpm").value = ""; $("cueEdit").hidden = true; return; }
   if (document.activeElement !== $("songName")) $("songName").value = s.name || "";
   if (document.activeElement !== $("songNote")) $("songNote").value = s.note || "";
   if (document.activeElement !== $("songBpm")) $("songBpm").value = s.bpm || "";
@@ -1347,7 +1331,9 @@ function renderCues() {
   if (!s.cues.length && !editMode) g.innerHTML = `<p class="hint">This song has no cues. Switch to <b>Edit</b> to add some.</p>`;
   sweepStrips();
 }
-function renderShow() { renderSvcSelect(); renderSvcList(); renderLibList(); renderService(); renderSetlist(); renderCues(); if (editIdx < 0) $("cueEdit").hidden = true; }
+function renderShow() {
+  const sv = svc(); if (sv && sv.songs.some(isHdr)) { const cur = sv.songs[songIdx]; sv.songs = sv.songs.filter((x) => !isHdr(x)); songIdx = Math.max(0, sv.songs.indexOf(cur)); saveService(sv); }
+  renderSvcSelect(); renderSetlist(); renderCues(); if (editIdx < 0) $("cueEdit").hidden = true; }
 
 /* Song meta */
 $("songName").oninput = (e) => { if (!song()) return; song().name = e.target.value; saveService(svc()); renderSetlist(); $("liveSong").textContent = e.target.value; };
@@ -1383,7 +1369,9 @@ function parseArrangement(text) {
 }
 const ARR_PRESETS = [["Standard", "I V1 PC C V2 PC C B C C O"], ["Simple", "I V1 C V2 C B C O"], ["Worship", "I V1 V2 C C B B C T E"], ["Hymn", "I V1 V2 V3 V4 E"]];
 function songSheet(title, init) {
+  const reuse = init.reuse || [];
   return modal(`<h2>${esc(title)}</h2>
+    ${reuse.length ? `<label>Use a song from a past service (optional)<select id="sgReuse"><option value="">New song</option>${reuse.map(({ song: x }) => `<option value="${esc(x.name)}">${esc(x.name)}</option>`).join("")}</select></label>` : ""}
     <label>Song name<input type="text" id="sgName" value="${esc(init.name || "")}" placeholder="e.g. Way Maker"></label>
     <div class="row tight" style="gap:10px"><label style="flex:1">BPM<input type="number" id="sgBpm" value="${init.bpm || 100}" min="40" max="220" inputmode="numeric"></label>
       <label style="flex:1">Key / notes<input type="text" id="sgNote" value="${esc(init.note || "")}" placeholder="e.g. Key of A"></label></div>
@@ -1394,9 +1382,12 @@ function songSheet(title, init) {
     <div class="acts"><button class="btn" id="mNo">Cancel</button><button class="btn inv" id="mOk">${init.ok || "Create"}</button></div>`, (close) => {
     setTimeout(() => $("sgName").focus(), 50);
     $("sheet").querySelectorAll("[data-arr]").forEach((b) => (b.onclick = () => ($("sgArr").value = b.dataset.arr)));
+    if ($("sgReuse")) $("sgReuse").onchange = (e) => { const x = reuse.find(({ song: y }) => y.name === e.target.value)?.song; const on = !!x;
+      if (x) { $("sgName").value = x.name; $("sgBpm").value = x.bpm || 100; $("sgNote").value = x.note || ""; $("sgArr").value = x.arr || x.cues.map((c) => c.name.replace(/\s+/g, "")).join(" "); }
+      $("sgArr").disabled = on; $("sheet").querySelectorAll("[data-arr]").forEach((b) => (b.disabled = on)); };
     $("mNo").onclick = () => close(null);
     $("mOk").onclick = () => { const name = $("sgName").value.trim(); if (!name) { $("sgName").focus(); return; }
-      close({ name, bpm: clamp(+$("sgBpm").value || 100, 40, 220), note: $("sgNote").value.trim(), arr: $("sgArr").value.trim() }); };
+      close({ name, bpm: clamp(+$("sgBpm").value || 100, 40, 220), note: $("sgNote").value.trim(), arr: $("sgArr").value.trim(), reuse: $("sgReuse")?.value || "" }); };
   });
 }
 $("songArr").onclick = async () => {
@@ -1405,7 +1396,6 @@ $("songArr").onclick = async () => {
   if (!(await confirmBox("Replace this song's cues?", "Cues are rebuilt from the arrangement with default looks. Looks you set by hand will be replaced.", "Replace", true))) return;
   Object.assign(s, { name: r.name, bpm: r.bpm, note: r.note, arr: r.arr, cues: parseArrangement(r.arr) }); cueIdx = -1; editIdx = -1; saveService(svc()); renderShow();
 };
-$("songDup").onclick = () => { const s = svc()?.songs[songIdx]; if (!s) return; const c = JSON.parse(JSON.stringify(s)); c.id = uid(); c.name += " (copy)"; svc().songs.splice(songIdx + 1, 0, c); songIdx++; saveService(svc()); renderShow(); };
 $("songDel").onclick = async () => { const s = svc()?.songs[songIdx]; if (!s || !(await confirmBox(`Remove "${s.name}" from this service?`, "", "Remove", true))) return; svc().songs.splice(songIdx, 1); songIdx = Math.max(0, songIdx - 1); cueIdx = -1; editIdx = -1; saveService(svc()); renderShow(); };
 $("songUp").onclick = () => moveSong(-1); $("songDown").onclick = () => moveSong(1);
 function moveSong(d) { if (!svc()) return; const a = svc().songs, j = songIdx + d; if (j < 0 || j >= a.length) return; [a[songIdx], a[j]] = [a[j], a[songIdx]]; songIdx = j; saveService(svc()); renderSetlist(); }
@@ -1659,8 +1649,8 @@ function serviceMenu(i) {
     $("mNo").onclick = () => close();
     const save = () => { s.name = $("smName").value.trim() || "Untitled Service"; s.service_date = $("smDate").value || s.service_date; s.notes = $("smNotes").value; saveService(s); sortServices(); svcIdx = DB.services.indexOf(s); close(); renderShow(); };
     $("smSave").onclick = save; $("smName").onkeydown = (e) => { if (e.key === "Enter") save(); };
-    $("smDup").onclick = () => { close(); svcIdx = i; setTimeout(() => $("svcDup").click(), 30); };
-    $("smDel").onclick = () => { close(); svcIdx = i; setTimeout(() => $("svcDel").click(), 30); };
+    $("smDup").onclick = () => { close(); svcIdx = i; setTimeout(dupService, 30); };
+    $("smDel").onclick = () => { close(); svcIdx = i; setTimeout(deleteService, 30); };
   });
 }
 
